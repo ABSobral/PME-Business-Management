@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* A cor principal vem das Definições (app.definicoes.cor) e é aplicada em --marca pelo tema.ts.
+   Os tons claros e escuros calculam-se a partir dela, por isso basta mudar uma cor para mudar a app toda. */
+:root {
+  --marca: #334155;
+  --marca-texto: #ffffff;
+}
+
+@theme inline {
+  --color-marca: var(--marca);
+  --color-marca-50: color-mix(in oklab, var(--marca) 7%, white);
+  --color-marca-100: color-mix(in oklab, var(--marca) 14%, white);
+  --color-marca-200: color-mix(in oklab, var(--marca) 30%, white);
+  --color-marca-300: color-mix(in oklab, var(--marca) 50%, white);
+  --color-marca-600: color-mix(in oklab, var(--marca) 85%, white);
+  --color-marca-700: var(--marca);
+  --color-marca-800: color-mix(in oklab, var(--marca) 78%, black);
+  --color-sobre-marca: var(--marca-texto);
+}
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html, body, #root { height: 100%; }
+html, body { overscroll-behavior-y: none; }
+body { @apply bg-stone-50 text-stone-900 antialiased; font-family: var(--font-sans); }
+h1, h2, h3 { letter-spacing: -0.015em; }
+.numero { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); }
+
+@utility btn { @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:pointer-events-none; }
+@layer components {
+  .card { @apply rounded-2xl bg-white ring-1 ring-stone-200/80; }
+  .btn-primary { @apply btn bg-marca-700 text-sobre-marca hover:bg-marca-800; }
+  .btn-perigo { @apply btn bg-red-600 text-white hover:bg-red-700; }
+  .btn-outline { @apply btn bg-white ring-1 ring-stone-300 hover:bg-stone-50; }
+  .btn-ghost { @apply btn text-marca-700 hover:bg-marca-50; }
+  .input { @apply w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-marca-600 focus:ring-2 focus:ring-marca-100; }
+  .label { @apply mb-1 block text-[11px] font-semibold uppercase tracking-wide text-stone-500; }
+  .badge { @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold; }
+}
+
+@media (max-width: 1023px) {
+  body { -webkit-tap-highlight-color: transparent; }
+}
+@media (max-width: 639px) {
+  .input, select.input, textarea.input { font-size: 16px; }
+  .btn { min-height: 2.75rem; }
+}
+@layer components {
+  @media (max-width: 639px) { .input { min-height: 2.75rem; } }
+}
+body.modal-aberto { overflow: hidden; }
+
+@media print {
+  body { background: white; }
+}

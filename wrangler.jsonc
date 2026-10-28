@@ -1,0 +1,11 @@
+// Publicar no Cloudflare Workers só com ficheiros estáticos (sem código no servidor).
+// Muda "name" para o nome que quiseres; o endereço fica <name>.<a-tua-conta>.workers.dev.
+{
+  "name": "gestao-pequeno-negocio",
+  "compatibility_date": "2025-09-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
