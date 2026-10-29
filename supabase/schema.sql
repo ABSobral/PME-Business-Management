@@ -9,7 +9,9 @@
 --   * só membros ativos da equipa (tabela app.membros) leem e escrevem dados;
 --   * só administradores gerem a equipa e as definições do negócio;
 --   * a primeira pessoa a entrar, com a tabela de membros vazia, passa a administradora;
---   * visitantes sem conta (anon) só podem chamar app.proposta_publica e app.proposta_responder.
+--   * visitantes sem conta (anon) só podem chamar app.proposta_publica e app.proposta_responder;
+--   * os módulos Email e Banco são para administradores e para os membros com esse acesso (app.membros.acessos);
+--     passwords e chaves ficam no Supabase Vault e só as Edge Functions as leem (app.ler_segredo, service_role).
 
 create schema if not exists app;
 
@@ -447,6 +449,232 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- Módulos opcionais: Email (IMAP e SMTP) e Banco (Enable Banking e extratos)
+-- ---------------------------------------------------------------------------
+-- Cada módulo liga-se e desliga-se em Definições (app.definicoes.modulo_email / modulo_banco).
+-- Os administradores usam tudo; os membros só os módulos que estão em app.membros.acessos.
+-- As passwords e chaves ficam no Supabase Vault: o browser só pode guardá-las (administradores)
+-- e perguntar se existem; quem as lê são as Edge Functions, com a chave service_role.
+
+alter table app.membros add column if not exists acessos text[] not null default '{}';
+alter table app.membros drop constraint if exists membros_acessos_check;
+alter table app.membros add constraint membros_acessos_check check (acessos <@ array['email', 'banco']::text[]);
+
+alter table app.definicoes add column if not exists modulo_email boolean not null default false;
+alter table app.definicoes add column if not exists modulo_banco boolean not null default false;
+-- servidores, portas, utilizador e nome do remetente (sem a password, que vai para o Vault)
+alter table app.definicoes add column if not exists email_config jsonb not null default '{}'::jsonb;
+-- ID da aplicação no Enable Banking, país e endereço de regresso (a chave privada vai para o Vault)
+alter table app.definicoes add column if not exists banco_config jsonb not null default '{}'::jsonb;
+alter table app.definicoes add column if not exists banco_categorias jsonb not null default '["Vendas", "Sinal de cliente", "Fornecedores", "Material", "Salários", "Impostos e Segurança Social", "Renda", "Comunicações", "Transportes", "Publicidade", "Comissões bancárias", "Transferência entre contas", "Outros"]'::jsonb;
+alter table app.definicoes drop constraint if exists definicoes_modulos_check;
+alter table app.definicoes add constraint definicoes_modulos_check check (
+  jsonb_typeof(email_config) = 'object' and jsonb_typeof(banco_config) = 'object'
+  and jsonb_typeof(banco_categorias) = 'array' and jsonb_array_length(banco_categorias) <= 60);
+
+-- pastas da caixa de correio, com o último UID lido (sincronização incremental)
+create table if not exists app.email_pastas (
+  caminho         text primary key check (length(caminho) between 1 and 300),
+  nome            text not null,
+  especial        text check (especial is null or especial in ('entrada', 'enviados', 'lixo', 'rascunhos', 'spam', 'arquivo')),
+  separador       text,
+  uidvalidity     bigint,
+  ultimo_uid      bigint not null default 0,
+  total           integer not null default 0,
+  nao_lidos       integer not null default 0,
+  sincronizada_em timestamptz,
+  criado_em       timestamptz not null default now(),
+  atualizado_em   timestamptz not null default now()
+);
+
+create table if not exists app.emails (
+  id            uuid primary key default gen_random_uuid(),
+  pasta         text not null,
+  uid           bigint not null,
+  uidvalidity   bigint,
+  message_id    text,
+  in_reply_to   text,
+  referencias   text,
+  de_nome       text,
+  de_email      text,
+  para          jsonb not null default '[]'::jsonb check (jsonb_typeof(para) = 'array'),
+  cc            jsonb not null default '[]'::jsonb check (jsonb_typeof(cc) = 'array'),
+  assunto       text not null default '',
+  data          timestamptz not null default now(),
+  lido          boolean not null default false,
+  respondido    boolean not null default false,
+  -- [{"parte": "2", "nome": "fatura.pdf", "tipo": "application/pdf", "tamanho": 12345}]
+  anexos        jsonb not null default '[]'::jsonb check (jsonb_typeof(anexos) = 'array'),
+  resumo        text,
+  -- texto e HTML completos, guardados na primeira vez que o email é aberto
+  texto         text,
+  html          text,
+  corpo_em      timestamptz,
+  contacto_id   uuid references app.contactos(id) on delete set null,
+  criado_em     timestamptz not null default now(),
+  unique (pasta, uid)
+);
+create index if not exists emails_data_idx on app.emails (pasta, data desc);
+create index if not exists emails_message_id_idx on app.emails (message_id);
+create index if not exists emails_contacto_idx on app.emails (contacto_id);
+
+create table if not exists app.banco_ligacoes (
+  id            uuid primary key default gen_random_uuid(),
+  banco         text not null,
+  pais          text not null default 'PT' check (pais ~ '^[A-Z]{2}$'),
+  psu_type      text not null default 'business' check (psu_type in ('business', 'personal')),
+  estado        text not null default 'pendente' check (estado in ('pendente', 'escolher', 'ativa', 'expirada')),
+  session_id    text,
+  conta_uid     text,
+  iban          text,
+  nome_conta    text,
+  moeda         text,
+  valido_ate    timestamptz,
+  saldo_atual   numeric(14,2),
+  saldo_em      timestamptz,
+  ultima_sinc   timestamptz,
+  ultimo_erro   text,
+  criado_por    text,
+  criado_em     timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create table if not exists app.movimentos (
+  id            uuid primary key default gen_random_uuid(),
+  ligacao_id    uuid references app.banco_ligacoes(id) on delete set null,
+  data          date not null,
+  valor         numeric(14,2) not null,
+  descritivo    text not null default '' check (length(descritivo) <= 500),
+  contraparte   text,
+  saldo         numeric(14,2),
+  origem        text not null default 'extrato' check (origem in ('enablebanking', 'extrato', 'manual')),
+  -- impressão digital do movimento: o mesmo movimento nunca entra duas vezes
+  hash          text not null unique check (hash ~ '^[0-9a-f]{16,64}$'),
+  categoria     text check (categoria is null or length(categoria) <= 80),
+  negocio_id    uuid references app.negocios(id) on delete set null,
+  notas         text check (notas is null or length(notas) <= 4000),
+  revisto       boolean not null default false,
+  revisto_por   text,
+  revisto_em    timestamptz,
+  criado_em     timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+create index if not exists movimentos_data_idx on app.movimentos (data desc);
+create index if not exists movimentos_negocio_idx on app.movimentos (negocio_id);
+
+do $$
+declare t text;
+begin
+  foreach t in array array['email_pastas', 'banco_ligacoes', 'movimentos'] loop
+    execute format('drop trigger if exists tocar on app.%I', t);
+    execute format('create trigger tocar before update on app.%I for each row execute function app.tocar()', t);
+  end loop;
+end $$;
+
+-- o membro ativo pode usar o módulo? (administradores sempre; membros se o tiverem em "acessos")
+create or replace function app.pode(p_modulo text) returns boolean
+language sql stable security definer set search_path = ''
+as $$
+  select exists (select 1 from app.membros m
+                  where m.email = app.meu_email() and m.ativo
+                    and (m.papel = 'admin' or p_modulo = any (m.acessos)))
+$$;
+
+-- nomes de segredos que a app pode guardar (nada mais entra no Vault por aqui)
+create or replace function app.segredo_permitido(p_nome text) returns boolean
+language sql immutable set search_path = ''
+as $$ select p_nome in ('email_password', 'enablebanking_key') $$;
+
+-- Guarda (ou substitui) um segredo no Vault. Só administradores e só nomes da lista.
+-- Nunca devolve o valor. No Vault fica com o nome "app.<nome>".
+create or replace function app.guardar_segredo(p_nome text, p_valor text) returns boolean
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  v_id uuid;
+begin
+  if not app.e_admin() then
+    raise exception 'Só os administradores guardam passwords e chaves.' using errcode = 'insufficient_privilege';
+  end if;
+  if not app.segredo_permitido(p_nome) then
+    raise exception 'Nome de segredo não permitido.' using errcode = 'check_violation';
+  end if;
+  if p_valor is null or length(btrim(p_valor)) = 0 or length(p_valor) > 20000 then
+    raise exception 'Valor vazio ou demasiado grande.' using errcode = 'check_violation';
+  end if;
+  select s.id into v_id from vault.secrets s where s.name = 'app.' || p_nome;
+  if v_id is null then
+    perform vault.create_secret(p_valor, 'app.' || p_nome, 'Gestão: ' || p_nome);
+  else
+    perform vault.update_secret(v_id, p_valor);
+  end if;
+  return true;
+end
+$$;
+
+-- Apaga um segredo (desligar o email ou o banco). Só administradores.
+create or replace function app.apagar_segredo(p_nome text) returns boolean
+language plpgsql volatile security definer set search_path = ''
+as $$
+begin
+  if not app.e_admin() then
+    raise exception 'Só os administradores apagam passwords e chaves.' using errcode = 'insufficient_privilege';
+  end if;
+  if not app.segredo_permitido(p_nome) then
+    raise exception 'Nome de segredo não permitido.' using errcode = 'check_violation';
+  end if;
+  delete from vault.secrets where name = 'app.' || p_nome;
+  return true;
+end
+$$;
+
+-- Diz só se o segredo existe (para a app mostrar "guardada"). Qualquer membro ativo.
+create or replace function app.segredo_existe(p_nome text) returns boolean
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if not app.e_membro() or not app.segredo_permitido(p_nome) then return false; end if;
+  return exists (select 1 from vault.secrets where name = 'app.' || p_nome);
+end
+$$;
+
+-- Lê o segredo em claro. Só para as Edge Functions (service_role); nunca é dada ao browser.
+create or replace function app.ler_segredo(p_nome text) returns text
+language plpgsql stable security definer set search_path = ''
+as $$
+declare v text;
+begin
+  if not app.segredo_permitido(p_nome) then return null; end if;
+  select d.decrypted_secret into v from vault.decrypted_secrets d where d.name = 'app.' || p_nome;
+  return v;
+end
+$$;
+
+alter table app.email_pastas   enable row level security;
+alter table app.emails         enable row level security;
+alter table app.banco_ligacoes enable row level security;
+alter table app.movimentos     enable row level security;
+
+-- email: quem tem acesso lê; as mudanças passam pela Edge Function (para ficarem também no servidor de correio)
+drop policy if exists email_ler on app.email_pastas;
+create policy email_ler on app.email_pastas for select to authenticated using (app.pode('email'));
+drop policy if exists email_ler on app.emails;
+create policy email_ler on app.emails for select to authenticated using (app.pode('email'));
+
+-- banco: quem tem acesso lê as ligações (criadas e mudadas só pela Edge Function) e trabalha nos movimentos;
+-- apagar movimentos é só para administradores
+drop policy if exists banco_ler on app.banco_ligacoes;
+create policy banco_ler on app.banco_ligacoes for select to authenticated using (app.pode('banco'));
+drop policy if exists banco_ler on app.movimentos;
+create policy banco_ler on app.movimentos for select to authenticated using (app.pode('banco'));
+drop policy if exists banco_criar on app.movimentos;
+create policy banco_criar on app.movimentos for insert to authenticated with check (app.pode('banco') and origem <> 'enablebanking');
+drop policy if exists banco_mudar on app.movimentos;
+create policy banco_mudar on app.movimentos for update to authenticated using (app.pode('banco')) with check (app.pode('banco'));
+drop policy if exists banco_apagar on app.movimentos;
+create policy banco_apagar on app.movimentos for delete to authenticated using (app.e_admin());
+
+-- ---------------------------------------------------------------------------
 -- Permissões
 -- ---------------------------------------------------------------------------
 
@@ -455,11 +683,19 @@ grant usage on schema app to anon, authenticated, service_role;
 revoke all on all tables in schema app from anon, public;
 grant select, insert, update, delete on all tables in schema app to authenticated;
 revoke insert, delete on app.definicoes from authenticated;
+-- email e ligações ao banco: o browser só lê (escreve a Edge Function, com service_role)
+revoke insert, update, delete on app.emails, app.email_pastas, app.banco_ligacoes from authenticated;
+-- movimentos: o browser importa extratos e classifica; data, valor e descritivo não se mudam depois
+revoke update on app.movimentos from authenticated;
+grant update (categoria, negocio_id, notas, revisto, revisto_por, revisto_em) on app.movimentos to authenticated;
 grant all on all tables in schema app to service_role;
 grant usage, select on all sequences in schema app to authenticated, service_role;
 
 revoke execute on all functions in schema app from public, anon;
 grant execute on function app.meu_email(), app.e_membro(), app.e_admin(), app.entrar_primeira_vez(),
-  app.atualizar_perfil(text, text, text) to authenticated;
+  app.atualizar_perfil(text, text, text), app.pode(text), app.guardar_segredo(text, text),
+  app.apagar_segredo(text), app.segredo_existe(text) to authenticated;
+-- app.ler_segredo e app.segredo_permitido ficam só para service_role (as Edge Functions)
+revoke execute on function app.ler_segredo(text) from authenticated;
 grant execute on function app.proposta_publica(text), app.proposta_responder(text, boolean, text, text) to anon, authenticated;
 grant execute on all functions in schema app to service_role;

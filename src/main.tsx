@@ -16,6 +16,9 @@ import Calendario from './pages/Calendario'
 import Definicoes from './pages/Definicoes'
 import { ListaPropostas, EditorProposta } from './pages/Propostas'
 import PropostaPublica from './pages/PropostaPublica'
+import Email from './pages/Email'
+import Banco from './pages/Banco'
+import AvisoVersao from './components/AvisoVersao'
 
 aplicarMarca(marcaGuardada(), false)
 
@@ -34,7 +37,7 @@ function Aviso({ titulo, texto, sair }: { titulo: string; texto: string; sair?: 
 }
 
 function App() {
-  const { sessao, semSessao, acesso, erro } = useDados()
+  const { sessao, semSessao, acesso, erro, pode } = useDados()
   if (semSessao) return <Entrar />
   if (!sessao || acesso === 'a_carregar') return <div className="flex h-full items-center justify-center" aria-busy="true"><div className="h-10 w-10 animate-pulse rounded-xl bg-marca-700" /></div>
   if (acesso === 'erro') return <Aviso titulo="Não foi possível ler os dados" texto={`${erro ?? ''} Confirme que o esquema "app" está exposto na API do Supabase e que correu o schema.sql.`} sair />
@@ -49,6 +52,8 @@ function App() {
         <Route path="calendario" element={<Calendario />} />
         <Route path="propostas" element={<ListaPropostas />} />
         <Route path="propostas/:id" element={<EditorProposta />} />
+        <Route path="email" element={pode('email') ? <Email /> : <Inicio />} />
+        <Route path="banco" element={pode('banco') ? <Banco /> : <Inicio />} />
         <Route path="definicoes" element={<Definicoes />} />
         <Route path="*" element={<Inicio />} />
       </Route>
@@ -66,6 +71,6 @@ function Raiz() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter><DialogoProvider><Raiz /></DialogoProvider></BrowserRouter>
+    <BrowserRouter><DialogoProvider><Raiz /><AvisoVersao /></DialogoProvider></BrowserRouter>
   </StrictMode>,
 )

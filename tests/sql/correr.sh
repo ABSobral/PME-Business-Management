@@ -15,6 +15,7 @@ PSQL=("$PG_BIN/psql" -h "$DIR" -p "$PORTA" -U postgres -d postgres -v ON_ERROR_S
 
 export PGOPTIONS="-c client_min_messages=warning"
 "${PSQL[@]}" -f "$AQUI/stub_auth.sql"
+"${PSQL[@]}" -f "$AQUI/stub_vault.sql"
 echo "schema.sql, 1.ª vez"; "${PSQL[@]}" -f "$RAIZ/supabase/schema.sql"
 echo "schema.sql, 2.ª vez"; "${PSQL[@]}" -f "$RAIZ/supabase/schema.sql"
 PGOPTIONS="" "${PSQL[@]}" -f "$AQUI/testes_rls.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE:  /  /'

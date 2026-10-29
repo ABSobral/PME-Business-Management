@@ -178,4 +178,132 @@ do $$ declare n app.negocios; p app.propostas; r jsonb; begin
 end $$;
 commit;
 
+-- 8. módulos Email e Banco: segredos no Vault e acessos por membro
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-00000000000a","email":"ana@exemplo.pt","role":"authenticated"}', true) \g /dev/null
+do $$ begin
+  if not app.guardar_segredo('email_password', 'password-da-app-1') then raise exception 'FALHOU 8.1'; end if;
+  if not app.guardar_segredo('email_password', 'password-da-app-2') then raise exception 'FALHOU 8.2'; end if;
+  if not app.segredo_existe('email_password') or app.segredo_existe('enablebanking_key') then raise exception 'FALHOU 8.3'; end if;
+  raise notice 'ok 8.1 a 8.3 a admin guarda e substitui a password; segredo_existe só diz sim ou não';
+end $$;
+do $$ begin
+  perform app.guardar_segredo('service_role_key', 'x'); raise exception 'FALHOU 8.4';
+exception when check_violation then raise notice 'ok 8.4 nomes fora da lista recusados'; end $$;
+do $$ begin
+  perform app.ler_segredo('email_password'); raise exception 'FALHOU 8.5 admin leu o segredo';
+exception when insufficient_privilege then raise notice 'ok 8.5 nem a admin lê o segredo pelo browser'; end $$;
+do $$ begin
+  perform 1 from vault.decrypted_secrets; raise exception 'FALHOU 8.6';
+exception when insufficient_privilege then raise notice 'ok 8.6 o Vault não se lê diretamente'; end $$;
+do $$ declare n int; begin
+  update app.definicoes set modulo_email = true, modulo_banco = true, email_config = '{"imap_host":"imap.exemplo.pt"}' where id = 1;
+  update app.membros set acessos = array['email'] where email = 'bruno@exemplo.pt';
+  insert into app.banco_ligacoes (banco) values ('Banco Pirata'); raise exception 'FALHOU 8.7 browser criou ligação';
+exception when insufficient_privilege then raise notice 'ok 8.7 ligações ao banco só pela Edge Function'; end $$;
+do $$ begin
+  update app.membros set acessos = array['tudo'] where email = 'bruno@exemplo.pt'; raise exception 'FALHOU 8.8';
+exception when check_violation then raise notice 'ok 8.8 acessos só "email" e "banco"'; end $$;
+update app.definicoes set modulo_email = true, modulo_banco = true where id = 1;
+update app.membros set acessos = array['email'] where email = 'bruno@exemplo.pt';
+insert into app.movimentos (data, valor, descritivo, hash) values (current_date, -12.5, 'Papelaria', 'aaaaaaaaaaaaaaaa1111'), (current_date, 1234.56, 'Transferência de cliente', 'aaaaaaaaaaaaaaaa2222');
+insert into app.movimentos (data, valor, descritivo, hash) values (current_date, -12.5, 'Papelaria', 'aaaaaaaaaaaaaaaa1111') on conflict (hash) do nothing;
+do $$ declare n int; begin
+  select count(*) into n from app.movimentos; if n <> 2 then raise exception 'FALHOU 8.9 % movimentos', n; end if;
+  if not app.pode('banco') or not app.pode('email') then raise exception 'FALHOU 8.10'; end if;
+  raise notice 'ok 8.9 e 8.10 importar não repete movimentos (hash único); a admin pode tudo';
+end $$;
+do $$ begin
+  insert into app.movimentos (data, valor, hash, origem) values (current_date, 1, 'bbbbbbbbbbbbbbbb0000', 'enablebanking'); raise exception 'FALHOU 8.11';
+exception when insufficient_privilege then raise notice 'ok 8.11 o browser não finge movimentos do banco'; end $$;
+commit;
+
+-- service_role (Edge Function) lê o segredo e escreve emails e ligações
+begin;
+set local role service_role;
+do $$ begin
+  if app.ler_segredo('email_password') <> 'password-da-app-2' then raise exception 'FALHOU 8.12'; end if;
+  insert into app.email_pastas (caminho, nome, especial) values ('INBOX', 'Entrada', 'entrada');
+  insert into app.emails (pasta, uid, assunto, de_email) values ('INBOX', 1, 'Olá', 'rui@cliente.pt');
+  insert into app.banco_ligacoes (banco, estado) values ('Banco Teste', 'ativa');
+  raise notice 'ok 8.12 a Edge Function (service_role) lê o segredo e escreve';
+end $$;
+commit;
+
+-- membro com acesso ao email mas não ao banco
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-00000000000b","email":"bruno@exemplo.pt","role":"authenticated"}', true) \g /dev/null
+do $$ declare n int; begin
+  select count(*) into n from app.emails; if n <> 1 then raise exception 'FALHOU 8.13 viu % emails', n; end if;
+  select count(*) into n from app.movimentos; if n <> 0 then raise exception 'FALHOU 8.14 viu % movimentos', n; end if;
+  select count(*) into n from app.banco_ligacoes; if n <> 0 then raise exception 'FALHOU 8.15'; end if;
+  update app.movimentos set categoria = 'Outros'; get diagnostics n = row_count; if n <> 0 then raise exception 'FALHOU 8.16'; end if;
+  if not app.segredo_existe('email_password') then raise exception 'FALHOU 8.17'; end if;
+  if app.pode('banco') or not app.pode('email') then raise exception 'FALHOU 8.18'; end if;
+  raise notice 'ok 8.13 a 8.18 membro sem acesso "banco" não vê movimentos nem ligações; vê os emails';
+end $$;
+do $$ begin
+  perform app.guardar_segredo('email_password', 'roubada'); raise exception 'FALHOU 8.19';
+exception when insufficient_privilege then raise notice 'ok 8.19 membro não guarda segredos'; end $$;
+do $$ begin
+  perform app.apagar_segredo('email_password'); raise exception 'FALHOU 8.20';
+exception when insufficient_privilege then raise notice 'ok 8.20 membro não apaga segredos'; end $$;
+do $$ begin
+  update app.emails set lido = true; raise exception 'FALHOU 8.21';
+exception when insufficient_privilege then raise notice 'ok 8.21 emails só mudam pela Edge Function'; end $$;
+do $$ begin
+  insert into app.movimentos (data, valor, hash) values (current_date, 5, 'cccccccccccccccc0000'); raise exception 'FALHOU 8.22';
+exception when insufficient_privilege then raise notice 'ok 8.22 membro sem acesso não importa movimentos'; end $$;
+commit;
+
+-- a admin dá acesso ao banco: o membro classifica, mas não muda o valor nem apaga
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-00000000000a","email":"ana@exemplo.pt","role":"authenticated"}', true) \g /dev/null
+update app.membros set acessos = array['email', 'banco'] where email = 'bruno@exemplo.pt';
+commit;
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-00000000000b","email":"bruno@exemplo.pt","role":"authenticated"}', true) \g /dev/null
+do $$ declare n int; begin
+  select count(*) into n from app.movimentos; if n <> 2 then raise exception 'FALHOU 8.23 viu %', n; end if;
+  update app.movimentos set categoria = 'Material', notas = 'Canetas', revisto = true where hash = 'aaaaaaaaaaaaaaaa1111'; get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FALHOU 8.24'; end if;
+  delete from app.movimentos; get diagnostics n = row_count; if n <> 0 then raise exception 'FALHOU 8.25 apagou'; end if;
+  raise notice 'ok 8.23 a 8.25 com acesso "banco" vê e classifica; apagar só administradores';
+end $$;
+do $$ begin
+  update app.movimentos set valor = 999 where hash = 'aaaaaaaaaaaaaaaa1111'; raise exception 'FALHOU 8.26';
+exception when insufficient_privilege then raise notice 'ok 8.26 o valor do movimento não se muda'; end $$;
+commit;
+
+-- membro inativo e anon: nada
+begin;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-00000000000c","email":"carla@exemplo.pt","role":"authenticated"}', true) \g /dev/null
+do $$ declare n int; begin
+  select count(*) into n from app.emails; if n <> 0 then raise exception 'FALHOU 8.27'; end if;
+  select count(*) into n from app.movimentos; if n <> 0 then raise exception 'FALHOU 8.28'; end if;
+  if app.segredo_existe('email_password') then raise exception 'FALHOU 8.29'; end if;
+  raise notice 'ok 8.27 a 8.29 membro inativo não vê emails, movimentos nem se há segredos';
+end $$;
+commit;
+begin;
+set local role anon;
+do $$ begin
+  perform 1 from app.movimentos; raise exception 'FALHOU 8.30';
+exception when insufficient_privilege then raise notice 'ok 8.30 anon não lê movimentos'; end $$;
+do $$ begin
+  perform 1 from app.emails; raise exception 'FALHOU 8.31';
+exception when insufficient_privilege then raise notice 'ok 8.31 anon não lê emails'; end $$;
+do $$ begin
+  perform app.segredo_existe('email_password'); raise exception 'FALHOU 8.32';
+exception when insufficient_privilege then raise notice 'ok 8.32 anon não chama funções de segredos'; end $$;
+do $$ begin
+  perform app.ler_segredo('email_password'); raise exception 'FALHOU 8.33';
+exception when insufficient_privilege then raise notice 'ok 8.33 anon não lê segredos'; end $$;
+commit;
+
 \echo 'TODOS OS TESTES PASSARAM'

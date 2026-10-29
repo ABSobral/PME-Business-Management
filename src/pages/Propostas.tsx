@@ -8,6 +8,7 @@ import { dataCurta, dinheiro, dinheiro2, hoje, somaDias } from '../lib/util'
 import PropostaDoc, { totais } from '../components/PropostaDoc'
 import { useDialogo } from '../components/Dialogo'
 import { Campo, Erro, InputNumero, Vazio } from '../components/ui'
+import Escrever, { type Rascunho } from '../components/Escrever'
 
 export function ListaPropostas() {
   const [lista, setLista] = useState<Proposta[] | null>(null)
@@ -40,7 +41,9 @@ export function ListaPropostas() {
 export function EditorProposta() {
   const { id } = useParams(); const [params] = useSearchParams()
   const navegar = useNavigate()
-  const { negocioDe, contactoDe, empresaDe, eu, negocios, definicoes, emCurso, gravar } = useDados()
+  const { negocioDe, contactoDe, empresaDe, eu, negocios, definicoes, emCurso, gravar, pode, recarregar } = useDados()
+  const [rascunho, setRascunho] = useState<Rascunho | null>(null)
+  const [enviadaPorEmail, setEnviadaPorEmail] = useState<string | null>(null)
   const { confirmar } = useDialogo()
   const [p, setP] = useState<Partial<Proposta> | null>(null)
   const [erro, setErro] = useState<string | null>(null)
@@ -95,11 +98,19 @@ export function EditorProposta() {
     try { await navigator.clipboard.writeText(link(g)) } catch { window.prompt('Copie o link:', link(g)) }
     setCopiado(true); setTimeout(() => setCopiado(false), 2500)
   }
+  const textoEmail = (g: Proposta) => {
+    const primeiro = (g.cliente_nome ?? '').split(/\s+/)[0]
+    return `Olá${primeiro ? ' ' + primeiro : ''},\n\nSegue a nossa proposta "${g.titulo}" (${dinheiro2(totais(g).base, g.moeda)} sem IVA).\nPode ver todos os detalhes e aceitar diretamente neste link:\n${link(g)}\n\nObrigado,\n${eu?.nome ?? ''}`
+  }
+  // com o módulo Email ligado, envia pela caixa do negócio (fica no histórico do contacto); sem ele, abre o programa de email
+  async function enviarPelaApp() {
+    const g = mudou || !p?.id ? await guardar() : (p as Proposta); if (!g) return
+    setRascunho({ titulo: 'Enviar proposta por email', para: g.cliente_email ? [g.cliente_email.trim().toLowerCase()] : [], cc: [], assunto: `Proposta: ${g.titulo}`, texto: textoEmail(g), negocio_id: g.negocio_id })
+  }
   async function enviarEmail() {
     let g = mudou || !p?.id ? await guardar() : (p as Proposta); if (!g) return
     g = await marcarEnviada(g)
-    const primeiro = (g.cliente_nome ?? '').split(/\s+/)[0]
-    const corpo = `Olá${primeiro ? ' ' + primeiro : ''},\n\nSegue a nossa proposta "${g.titulo}" (${dinheiro2(totais(g).base, g.moeda)} sem IVA).\nPode ver todos os detalhes e aceitar diretamente neste link:\n${link(g)}\n\nObrigado,\n${eu?.nome ?? ''}`
+    const corpo = textoEmail(g)
     window.location.href = `mailto:${encodeURIComponent(g.cliente_email ?? '')}?subject=${encodeURIComponent(`Proposta: ${g.titulo}`)}&body=${encodeURIComponent(corpo)}`
   }
   async function apagarProposta() {
@@ -124,12 +135,16 @@ export function EditorProposta() {
       <div className="mb-4 flex flex-wrap gap-2 print:hidden">
         <button className="btn-primary" onClick={guardar} disabled={aGuardar || !mudou}>{aGuardar ? 'A guardar' : mudou ? 'Guardar' : 'Guardado'}</button>
         <button className="btn-outline" onClick={copiarLink}><Copy size={16} />{copiado ? 'Link copiado' : 'Copiar link'}</button>
-        <button className="btn-outline" onClick={enviarEmail}><Mail size={16} /> Email</button>
+        {pode('email')
+          ? <button className="btn-outline" onClick={enviarPelaApp}><Mail size={16} /> Enviar proposta por email</button>
+          : <button className="btn-outline" onClick={enviarEmail}><Mail size={16} /> Email</button>}
         <button className="btn-outline" onClick={() => window.print()}><Printer size={16} /> PDF</button>
         {p.token && p.estado !== 'rascunho' && <a className="btn-outline" href={`/p/${p.token}`} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Ver como o cliente</a>}
         <button className="btn-outline lg:hidden" onClick={() => setVer(v => !v)}>{ver ? <PencilLine size={16} /> : <Eye size={16} />}{ver ? 'Editar' : 'Pré-visualizar'}</button>
         {p.id && <button className="btn text-stone-500 hover:bg-red-50 hover:text-red-700" aria-label="Apagar proposta" onClick={apagarProposta}><Trash2 size={16} /></button>}
       </div>
+      {enviadaPorEmail && <div role="status" className="mb-3 rounded-xl bg-emerald-50 px-4 py-2 text-sm text-emerald-800 print:hidden">{enviadaPorEmail}</div>}
+      <Escrever rascunho={rascunho} onFechar={() => setRascunho(null)} onEnviado={async r => { if (p?.id) await marcarEnviada(p as Proposta); setEnviadaPorEmail(`Proposta enviada por email.${r.atividades ? ' Ficou no histórico do contacto.' : ''}`); if (r.atividades) recarregar() }} />
       {respondida && mudou && <p className="mb-3 text-xs text-amber-800 print:hidden">Esta proposta já tem resposta do cliente; as mudanças não alteram o que ele aceitou ou recusou.</p>}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
         <div className={`min-w-0 space-y-4 print:hidden ${ver ? 'hidden lg:block' : ''}`}>

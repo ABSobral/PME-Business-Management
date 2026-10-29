@@ -1,0 +1,8 @@
+# Cabeçalhos para o Cloudflare Workers (assets) e para o Netlify.
+# versao.json nunca pode ficar em cache: é por ele que a app sabe que há uma versão nova.
+/versao.json
+  Cache-Control: no-store
+/index.html
+  Cache-Control: no-cache
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

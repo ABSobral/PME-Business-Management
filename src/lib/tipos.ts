@@ -1,5 +1,6 @@
 export type Papel = 'admin' | 'membro'
-export type Membro = { email: string; nome: string; cor: string; telefone: string | null; papel: Papel; ativo: boolean; criado_em: string }
+export type Modulo = 'email' | 'banco'
+export type Membro = { email: string; nome: string; cor: string; telefone: string | null; papel: Papel; ativo: boolean; acessos?: Modulo[]; criado_em: string }
 
 export type CorFase = 'cinza' | 'azul' | 'ambar' | 'violeta' | 'marca' | 'verde' | 'vermelho'
 export type TipoFase = 'aberto' | 'ganho' | 'perdido'
@@ -9,6 +10,38 @@ export type Definicoes = {
   nome_negocio: string; logo_url: string | null; cor: string; moeda: string; iva_pct: number
   email: string | null; telefone: string | null; site: string | null; morada: string | null; nif: string | null
   estados: Fase[]; proposta_intro: string; proposta_condicoes: string; proposta_validade_dias: number
+  modulo_email: boolean; modulo_banco: boolean; email_config: EmailConfig; banco_config: BancoConfig; banco_categorias: string[]
+}
+
+// ---- módulo Email (IMAP e SMTP) ----
+export type Cifra = 'ssl' | 'starttls' | 'nenhuma'
+export type EmailConfig = {
+  fornecedor?: string; imap_host?: string; imap_porta?: number; imap_cifra?: Cifra
+  smtp_host?: string; smtp_porta?: number; smtp_cifra?: Cifra
+  utilizador?: string; endereco?: string; nome_remetente?: string; guardar_enviados?: boolean
+}
+export type Endereco = { nome: string | null; email: string }
+export type AnexoEmail = { parte: string; nome: string; tipo: string; tamanho: number }
+export type EspecialPasta = 'entrada' | 'enviados' | 'lixo' | 'rascunhos' | 'spam' | 'arquivo'
+export type PastaEmail = { caminho: string; nome: string; especial: EspecialPasta | null; total: number; nao_lidos: number; sincronizada_em: string | null }
+export type Email = {
+  id: string; pasta: string; uid: number; message_id: string | null; in_reply_to: string | null; referencias: string | null
+  de_nome: string | null; de_email: string | null; para: Endereco[]; cc: Endereco[]; assunto: string; data: string
+  lido: boolean; respondido: boolean; anexos: AnexoEmail[]; resumo: string | null
+  texto: string | null; html: string | null; corpo_em: string | null; contacto_id: string | null
+}
+
+// ---- módulo Banco ----
+export type BancoConfig = { app_id?: string; pais?: string; redirect_url?: string }
+export type LigacaoBanco = {
+  id: string; banco: string; pais: string; psu_type: string; estado: 'pendente' | 'escolher' | 'ativa' | 'expirada'
+  iban: string | null; nome_conta: string | null; moeda: string | null; valido_ate: string | null
+  saldo_atual: number | null; saldo_em: string | null; ultima_sinc: string | null; ultimo_erro: string | null; criado_por: string | null; criado_em: string
+}
+export type Movimento = {
+  id: string; ligacao_id: string | null; data: string; valor: number; descritivo: string; contraparte: string | null; saldo: number | null
+  origem: 'enablebanking' | 'extrato' | 'manual'; hash: string; categoria: string | null; negocio_id: string | null; notas: string | null
+  revisto: boolean; revisto_por: string | null; revisto_em: string | null; criado_em: string
 }
 
 export type TipoEmpresa = 'cliente' | 'parceiro' | 'fornecedor' | 'outro'

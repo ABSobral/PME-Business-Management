@@ -1,22 +1,26 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { LayoutDashboard, KanbanSquare, Users, CalendarDays, Settings, LogOut, FileText, Menu, X } from 'lucide-react'
+import { LayoutDashboard, KanbanSquare, Users, CalendarDays, Settings, LogOut, FileText, Menu, X, Mail, Landmark } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useDados } from '../lib/dados'
 import { Avatar, Marca } from './ui'
 
-const itens = [
+// Email e Banco só aparecem quando o módulo está ligado em Definições e a pessoa tem acesso
+const todos = [
   { to: '/', label: 'Início', icon: LayoutDashboard, end: true },
   { to: '/pipeline', label: 'Pipeline', icon: KanbanSquare },
   { to: '/contactos', label: 'Contactos', icon: Users },
   { to: '/calendario', label: 'Calendário', icon: CalendarDays },
   { to: '/propostas', label: 'Propostas', icon: FileText },
+  { to: '/email', label: 'Email', icon: Mail, modulo: 'email' as const },
+  { to: '/banco', label: 'Banco', icon: Landmark, modulo: 'banco' as const },
   { to: '/definicoes', label: 'Definições', icon: Settings },
 ]
 const NO_FUNDO = ['/', '/pipeline', '/contactos', '/calendario']
 
 export default function Layout() {
-  const { eu, definicoes, negocios, faseDe, recarregar } = useDados()
+  const { eu, definicoes, negocios, faseDe, recarregar, pode } = useDados()
+  const itens = todos.filter(n => !n.modulo || pode(n.modulo))
   const [mais, setMais] = useState(false)
   const local = useLocation()
   const novos = negocios.filter(n => !n.arquivado && faseDe(n.estado).tipo === 'aberto' && n.proximo_passo_em && n.proximo_passo_em <= new Date().toISOString().slice(0, 10)).length

@@ -1,39 +1,21 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowDown, ArrowUp, Plus, Trash2, UserPlus } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useDados } from '../lib/dados'
-import { CORES_FASE, TIPOS_FASE, type CorFase, type Definicoes as Defs, type Fase, type Papel, type TipoFase } from '../lib/tipos'
+import { CORES_FASE, TIPOS_FASE, type CorFase, type Definicoes as Defs, type Fase, type Modulo, type Papel, type TipoFase } from '../lib/tipos'
+import { ConfigBanco, ConfigEmail, Modulos } from '../components/Modulos'
 import { emailValido, normaliza } from '../lib/util'
-import { Avatar, Campo, Erro, InputNumero } from '../components/ui'
+import { Avatar, Campo, InputNumero } from '../components/ui'
 import { useDialogo } from '../components/Dialogo'
+import { Aviso, Seccao, useGuardar } from '../components/Seccao'
 
 const MOEDAS = ['EUR', 'USD', 'GBP', 'BRL', 'CHF', 'AOA', 'MZN', 'CVE']
 const hex = (c: string) => /^#[0-9a-f]{6}$/i.test(c)
 
-function Seccao({ titulo, desc, children, rodape }: { titulo: string; desc?: string; children: ReactNode; rodape?: ReactNode }) {
-  return (
-    <section className="card space-y-4 p-4 sm:p-5">
-      <div><h2 className="text-lg font-semibold">{titulo}</h2>{desc && <p className="text-sm text-stone-500">{desc}</p>}</div>
-      {children}
-      {rodape && <div className="flex flex-wrap items-center justify-end gap-2 border-t border-stone-100 pt-3">{rodape}</div>}
-    </section>
-  )
-}
-function Aviso({ ok, erro }: { ok: string | null; erro: string | null }) {
-  return <>{erro && <span className="mr-auto"><Erro texto={erro} /></span>}{ok && <span className="mr-auto text-sm text-emerald-700" role="status">{ok}</span>}</>
-}
-// guarda e mostra "Guardado" ou o erro
-function useGuardar() {
-  const [ok, setOk] = useState<string | null>(null); const [erro, setErro] = useState<string | null>(null); const [aGuardar, setAGuardar] = useState(false)
-  const correr = async (f: () => Promise<void>, msg = 'Guardado.') => {
-    setOk(null); setErro(null); setAGuardar(true)
-    try { await f(); setOk(msg); setTimeout(() => setOk(null), 3000) } catch (e) { setErro((e as Error).message) } finally { setAGuardar(false) }
-  }
-  return { ok, erro, aGuardar, correr, setErro }
-}
-
 export default function Definicoes() {
-  const { eAdmin } = useDados()
+  const { eAdmin, definicoes } = useDados()
+  // links como /definicoes#banco levam à secção
+  useEffect(() => { const id = location.hash.slice(1); if (id) setTimeout(() => document.getElementById(id)?.scrollIntoView({ block: 'start' }), 100) }, [])
   return (
     <div className="mx-auto max-w-3xl space-y-5">
       <h1 className="text-2xl font-semibold">Definições</h1>
@@ -41,6 +23,9 @@ export default function Definicoes() {
       <Negocio />
       <Fases />
       <TextosPropostas />
+      {eAdmin && <Modulos />}
+      {eAdmin && definicoes.modulo_email && <ConfigEmail />}
+      {eAdmin && definicoes.modulo_banco && <ConfigBanco />}
       <Equipa />
       <Perfil />
     </div>
@@ -147,7 +132,7 @@ function TextosPropostas() {
 }
 
 function Equipa() {
-  const { membros, eAdmin, eu, recarregar } = useDados()
+  const { membros, eAdmin, eu, recarregar, definicoes } = useDados()
   const { confirmar } = useDialogo()
   const [novo, setNovo] = useState({ email: '', nome: '', papel: 'membro' as Papel })
   const g = useGuardar()
@@ -169,12 +154,19 @@ function Equipa() {
     g.correr(async () => { const { error } = await supabase.from('membros').delete().eq('email', email); if (error) throw new Error(error.message.includes('administrador') ? 'Tem de ficar pelo menos um administrador ativo.' : error.message); await recarregar() })
   }
   return (
-    <Seccao titulo="Equipa" desc="Quem pode entrar. Os administradores mudam definições e equipa; os membros trabalham nos dados." rodape={(g.ok || g.erro) && <Aviso ok={g.ok} erro={g.erro} />}>
+    <Seccao titulo="Equipa" desc={`Quem pode entrar. Os administradores mudam definições e equipa; os membros trabalham nos dados${definicoes.modulo_email || definicoes.modulo_banco ? ' e usam o Email e o Banco se lhes der esse acesso' : ''}.`} rodape={(g.ok || g.erro) && <Aviso ok={g.ok} erro={g.erro} />}>
       <ul className="divide-y divide-stone-100">
         {membros.map(m => (
           <li key={m.email} className="flex flex-wrap items-center gap-3 py-2.5">
             <Avatar nome={m.nome} cor={m.cor} tamanho={32} />
             <span className="min-w-0 flex-1 basis-40"><span className="block truncate text-sm font-medium">{m.nome}{m.email === eu?.email && <span className="text-stone-400"> (eu)</span>}</span><span className="block truncate text-xs text-stone-500">{m.email}</span></span>
+            {eAdmin && m.papel === 'membro' && (definicoes.modulo_email || definicoes.modulo_banco) && (
+              <span className="flex items-center gap-3 text-xs text-stone-600" role="group" aria-label={`Acessos de ${m.nome}`}>
+                {(['email', 'banco'] as Modulo[]).filter(x => (x === 'email' ? definicoes.modulo_email : definicoes.modulo_banco)).map(x => (
+                  <label key={x} className="flex items-center gap-1.5"><input type="checkbox" checked={(m.acessos ?? []).includes(x)} onChange={e => mudar(m.email, { acessos: e.target.checked ? [...new Set([...(m.acessos ?? []), x])] : (m.acessos ?? []).filter(y => y !== x) })} />{x === 'email' ? 'Email' : 'Banco'}</label>
+                ))}
+              </span>
+            )}
             {eAdmin ? <span className="flex items-center gap-2">
               <select className="input w-auto py-1 text-xs" aria-label={`Papel de ${m.nome}`} value={m.papel} onChange={e => mudar(m.email, { papel: e.target.value })}><option value="admin">Administrador</option><option value="membro">Membro</option></select>
               <label className="flex items-center gap-1.5 text-xs text-stone-600"><input type="checkbox" checked={m.ativo} onChange={e => mudar(m.email, { ativo: e.target.checked })} />Ativo</label>

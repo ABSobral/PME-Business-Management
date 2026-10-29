@@ -3,11 +3,14 @@
 #       python3 tests/historias.py            (acrescente --fotos para gravar as imagens do README em docs/)
 import os, re, sys, datetime as dt
 sys.path.insert(0, os.path.dirname(__file__))
-from mock import Mock, URL, abrir, scroll_horizontal, HOJE
+import json
+from mock import Mock, URL, abrir, scroll_horizontal, HOJE, correio_exemplo
 from playwright.sync_api import sync_playwright, expect
 
 VISTAS = [('computador', {'width': 1440, 'height': 900}), ('telemovel', {'width': 390, 'height': 844}), ('pequeno', {'width': 360, 'height': 740})]
 FOTOS = '--fotos' in sys.argv
+# python3 tests/historias.py --so historia_modulos   (corre só essas histórias)
+SO = sys.argv[sys.argv.index('--so') + 1].split(',') if '--so' in sys.argv else []
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ok, falhas, erros = [], [], []
 
@@ -243,6 +246,272 @@ def historia(p, rotulo, vp):
   intruso.close()
   ctx.browser.close()
 
+def semente_modulos(s):
+  s.novo('membros', {'email': 'ana@exemplo.pt', 'nome': 'Ana Silva', 'papel': 'admin'})
+  s.novo('membros', {'email': 'bruno@exemplo.pt', 'nome': 'Bruno Costa'})
+  rita = s.novo('contactos', {'nome': 'Rita Gonçalves', 'email': 'rita@padaria.pt', 'categoria': 'cliente'})
+  n = s.novo('negocios', {'titulo': 'Bolos para o evento', 'contacto_id': rita['id'], 'estado': 'proposta', 'valor': 120})
+  s.novo('propostas', {'titulo': 'Bolos para o evento', 'negocio_id': n['id'], 'cliente_nome': 'Rita Gonçalves', 'cliente_email': 'rita@padaria.pt', 'linhas': [{'descricao': 'Bolo', 'quantidade': 3, 'preco': 40}], 'validade': HOJE()})
+  correio_exemplo(s)
+
+PEM = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7teste\n-----END PRIVATE KEY-----'
+
+def menu(pg, movel, nome):
+  """abre um item do menu (no telemóvel está em "Mais")"""
+  if movel:
+    pg.get_by_role('button', name='Mais').click()
+  pg.get_by_role('link', name=nome, exact=True).first.click()
+  pg.wait_for_load_state('networkidle')
+
+def historia_modulos(p, rotulo, vp):
+  movel = vp['width'] < 1024
+  mock = Mock(semente_modulos)
+  ctx = p.chromium.launch().new_context(viewport=vp, accept_downloads=True)
+  pg = abrir(ctx, mock, 'ana@exemplo.pt', None, erros, rotulo + ' módulos')
+  d = mock.d['definicoes'][0]
+
+  # módulos desligados: sem Email nem Banco no menu
+  ir(pg, '/')
+  if movel: pg.get_by_role('button', name='Mais').click()
+  verifica(pg.locator('a[href="/email"]').count() == 0 and pg.locator('a[href="/banco"]').count() == 0, f'[{rotulo}] módulos desligados não aparecem no menu')
+  if movel: pg.get_by_role('button', name='Mais').click()
+
+  # ---- Email: ligar o módulo e configurar ----
+  ir(pg, '/definicoes')
+  cx = pg.get_by_role('checkbox', name=re.compile('Email \\(IMAP e SMTP\\)')); cx.click(); expect(cx).to_be_checked()
+  sec = pg.locator('section#email')
+  expect(sec).to_be_visible()
+  verifica(d['modulo_email'] is True, f'[{rotulo}] módulo Email ligado')
+  sec.get_by_label('Fornecedor').select_option('hostinger')
+  verifica(sec.get_by_label('Servidor IMAP (receber)').input_value() == 'imap.hostinger.com', f'[{rotulo}] predefinição da Hostinger preenche os servidores')
+  sec.get_by_label('Fornecedor').select_option('outlook')
+  expect(sec.get_by_text('Muito provavelmente não vai funcionar')).to_be_visible()
+  sec.get_by_label('Fornecedor').select_option('outro')
+  sec.get_by_label('Servidor IMAP (receber)').fill('imap.teste.pt')
+  sec.get_by_label('Servidor SMTP (enviar)').fill('smtp.teste.pt')
+  sec.get_by_label('Endereço de email').fill('ana@exemplo.pt')
+  sec.get_by_label('Nome do remetente').fill('Ana da Padaria')
+  sec.get_by_label('Password de aplicação').fill('errada')
+  sec.get_by_role('button', name='Testar ligação').click()
+  expect(sec.get_by_role('status', name='Resultado do teste')).to_contain_text('recusou o utilizador ou a password')
+  sec.get_by_label('Password de aplicação').fill('segredo')
+  sec.get_by_role('button', name='Testar ligação').click()
+  expect(sec.get_by_role('status', name='Resultado do teste')).to_contain_text('Receber (IMAP): ligação feita')
+  verifica('email_password' not in mock.segredos, f'[{rotulo}] testar não guarda a password')
+  sec.get_by_role('button', name='Guardar', exact=True).click()
+  expect(sec.get_by_role('status').filter(has_text='Guardado.')).to_be_visible()
+  verifica(mock.segredos.get('email_password') == 'segredo', f'[{rotulo}] password guardada pela função guardar_segredo (Vault)')
+  verifica('segredo' not in json.dumps(d) and d['email_config'].get('imap_host') == 'imap.teste.pt' and d['email_config'].get('utilizador') == 'ana@exemplo.pt', f'[{rotulo}] a password não vai para as definições')
+  expect(sec.get_by_label('Password de aplicação (guardada)')).to_have_value('')
+  sem_scroll(pg, 'Definições com módulos', rotulo)
+
+  # ---- Email: sincronizar, abrir, responder ----
+  menu(pg, movel, 'Email')
+  expect(pg).to_have_url(re.compile('/email$'))
+  lista = pg.get_by_role('region', name='Lista de emails')
+  expect(lista.get_by_text('Pedido de orçamento')).to_be_visible()
+  verifica(len(mock.d['emails']) == 2 and any(e['contacto_id'] for e in mock.d['emails']), f'[{rotulo}] sincronizou 2 emails e ligou o da Rita ao contacto')
+  sem_scroll(pg, 'Email (lista)', rotulo)
+  # procurar e não lidos
+  pg.get_by_label('Procurar emails').fill('orcamento')
+  expect(lista.locator('[data-email]')).to_have_count(1)
+  pg.get_by_label('Procurar emails').fill('')
+  lista.get_by_role('button', name=re.compile('^Não lidos')).click()
+  expect(lista.locator('[data-email]')).to_have_count(1)
+  lista.get_by_role('button', name='Todos', exact=True).click()
+  # a newsletter em HTML abre numa moldura isolada, sem scripts
+  lista.locator('[data-email="Novidades da semana"]').click()
+  moldura = pg.locator('iframe[title="Conteúdo do email"]')
+  expect(moldura).to_be_visible()
+  sandbox = moldura.get_attribute('sandbox') or ''
+  verifica('allow-scripts' not in sandbox, f'[{rotulo}] HTML do email sem scripts (sandbox="{sandbox}")')
+  expect(pg.frame_locator('iframe[title="Conteúdo do email"]').get_by_text('com desconto')).to_be_visible()
+  expect(pg.frame_locator('iframe[title="Conteúdo do email"]').get_by_text('Mensagem antiga citada')).to_be_hidden()
+  if movel: pg.get_by_role('button', name='Voltar à lista').click()
+  lista.locator('[data-email="Pedido de orçamento"]').click()
+  aberta = pg.get_by_role('region', name='Email aberto')
+  expect(aberta.get_by_text('queria um orçamento para 3 bolos')).to_be_visible()
+  expect(aberta.get_by_text('diga-nos do que precisa')).to_be_hidden()
+  aberta.get_by_role('button', name='Mostrar texto citado').click()
+  expect(aberta.get_by_text('diga-nos do que precisa')).to_be_visible()
+  expect(aberta.get_by_role('button', name=re.compile('lista.pdf'))).to_be_visible()
+  with pg.expect_download() as dl: aberta.get_by_role('button', name=re.compile('lista.pdf')).click()
+  verifica(dl.value.suggested_filename == 'lista.pdf', f'[{rotulo}] anexo descarregado')
+  sem_scroll(pg, 'Email aberto', rotulo)
+  aberta.get_by_role('button', name='Responder', exact=True).click()
+  dlg = pg.get_by_role('dialog')
+  expect(dlg.locator('[data-endereco="rita@padaria.pt"]')).to_be_visible()
+  expect(dlg.get_by_label('Assunto')).to_have_value('Re: Pedido de orçamento')
+  verifica('> Olá Ana,' in dlg.get_by_label('Mensagem').input_value(), f'[{rotulo}] resposta cita o original')
+  dlg.get_by_label('Mensagem').press('Control+Home')
+  dlg.get_by_label('Mensagem').type('Olá Rita, segue o orçamento. ')
+  cc = dlg.get_by_role('textbox', name='Cc')
+  cc.fill('rita@padaria'); cc.press('Enter')
+  expect(dlg.locator('[data-endereco="rita@padaria"]')).to_be_visible()
+  dlg.get_by_role('button', name='Enviar').click()
+  expect(dlg.get_by_role('alert')).to_contain_text('Há endereços inválidos: rita@padaria')
+  verifica(len(mock.enviados) == 0, f'[{rotulo}] endereço inválido bloqueia o envio')
+  dlg.get_by_role('button', name='Tirar rita@padaria', exact=True).click()
+  # sugestão de contacto no Cc
+  cc.fill('gonc')
+  expect(dlg.get_by_role('option', name=re.compile('Rita Gonçalves'))).to_be_visible()
+  cc.fill('')
+  dlg.get_by_label('Escolher anexos').set_input_files(files=[{'name': 'orçamento.txt', 'mimeType': 'text/plain', 'buffer': '3 bolos: 120 €'.encode()}])
+  expect(dlg.get_by_role('list', name='Anexos')).to_contain_text('orçamento.txt')
+  sem_scroll(pg, 'Escrever email', rotulo)
+  dlg.get_by_role('button', name='Enviar').click()
+  expect(pg.get_by_role('status').filter(has_text='Email enviado.')).to_be_visible()
+  env = mock.enviados[0] if mock.enviados else {}
+  orig = next((e for e in mock.d['emails'] if e['assunto'] == 'Pedido de orçamento'), {})
+  verifica(env.get('responder_a') == orig.get('id') and env.get('para') == ['rita@padaria.pt'] and len(env.get('anexos') or []) == 1 and env.get('texto', '').startswith('Olá Rita, segue'), f'[{rotulo}] resposta enviada com anexo e ligação ao original')
+  verifica(orig.get('respondido') is True, f'[{rotulo}] original marcado como respondido')
+  verifica(any(a['tipo'] == 'email' and a['resumo'] == 'Email enviado: Re: Pedido de orçamento' and a['negocio_id'] for a in mock.d['atividades']), f'[{rotulo}] envio ficou no histórico do contacto e do negócio')
+  # pastas (gaveta no telemóvel) e Enviados
+  if movel:
+    if pg.get_by_role('button', name='Voltar à lista').is_visible(): pg.get_by_role('button', name='Voltar à lista').click()
+    pg.get_by_role('button', name='Pastas').click()
+    gav = pg.get_by_role('dialog', name='Pastas')
+    gav.get_by_role('button', name='Enviados').click()
+  else:
+    pg.get_by_role('navigation', name='Pastas').get_by_role('button', name='Enviados').click()
+  expect(lista.get_by_text('Re: Pedido de orçamento')).to_be_visible()
+  sem_scroll(pg, 'Email enviados', rotulo)
+
+  # proposta enviada pelo módulo Email
+  pr = mock.d['propostas'][0]
+  ir(pg, f"/propostas/{pr['id']}")
+  pg.get_by_role('button', name='Enviar proposta por email').click()
+  dlg = pg.get_by_role('dialog')
+  expect(dlg.get_by_label('Assunto')).to_have_value('Proposta: Bolos para o evento')
+  verifica(f"/p/{pr['token']}" in dlg.get_by_label('Mensagem').input_value(), f'[{rotulo}] email da proposta leva o link')
+  dlg.get_by_role('button', name='Enviar').click()
+  expect(pg.get_by_role('status').filter(has_text='Proposta enviada por email')).to_be_visible()
+  verifica(pr['estado'] == 'enviada' and len(mock.enviados) == 2 and mock.enviados[1].get('negocio_id') == pr['negocio_id'], f'[{rotulo}] proposta marcada como enviada e email ligado ao negócio')
+
+  # ---- Banco ----
+  ir(pg, '/definicoes')
+  cx = pg.get_by_role('checkbox', name=re.compile('^Banco Saldo')); cx.click(); expect(cx).to_be_checked()
+  sec = pg.locator('section#banco')
+  expect(sec).to_be_visible()
+  sec.get_by_label('ID da aplicação (Enable Banking)').fill('11111111-2222-3333-4444-555555555555')
+  verifica(sec.get_by_label('Endereço de regresso (registe-o na aplicação)').input_value() == f'{URL}/banco', f'[{rotulo}] endereço de regresso por omissão')
+  sec.get_by_label('Chave privada', exact=True).fill('isto não é uma chave')
+  sec.get_by_role('button', name='Guardar', exact=True).click()
+  expect(sec.get_by_role('alert')).to_contain_text('ficheiro .pem')
+  sec.get_by_label('Chave privada', exact=True).fill(PEM)
+  sec.get_by_role('button', name='Guardar', exact=True).click()
+  expect(sec.get_by_text('Guardada', exact=True)).to_be_visible()
+  verifica(mock.segredos.get('enablebanking_key') == PEM and 'PRIVATE' not in json.dumps(d), f'[{rotulo}] chave do Enable Banking só no Vault')
+  contas = pg.locator('section', has=pg.get_by_role('heading', name='Contas ligadas'))
+  contas.get_by_role('button', name='Ligar um banco').click()
+  dlg = pg.get_by_role('dialog')
+  dlg.get_by_label('Procurar banco').fill('exemplo')
+  dlg.get_by_role('button', name=re.compile('Banco Exemplo')).click()
+  pg.wait_for_url(re.compile('/banco$'))
+  expect(pg.get_by_role('status').filter(has_text='Banco ligado. 3 movimentos trazidos.')).to_be_visible()
+  expect(pg.locator('[data-teste="saldo"]')).to_contain_text('1500,25')
+  expect(pg.locator('[data-teste="saldo"]')).to_contain_text('Autorização até')
+  verifica(mock.d['banco_ligacoes'][0]['estado'] == 'ativa', f'[{rotulo}] banco ligado pelo regresso do Enable Banking (simulado)')
+  sem_scroll(pg, 'Banco', rotulo)
+  # classificar
+  pg.locator('[data-movimento="COMPRA PAPELARIA"]').click()
+  dlg = pg.get_by_role('dialog')
+  dlg.get_by_label('Categoria').select_option('Material')
+  dlg.get_by_label('Negócio').select_option(label='Bolos para o evento')
+  dlg.get_by_label('Notas').fill('Caixas para os bolos'); dlg.get_by_label('Categoria').focus()
+  dlg.get_by_role('button', name='Marcar como revisto').click()
+  expect(dlg.get_by_role('button', name='Voltar a por rever')).to_be_visible()
+  m = next(x for x in mock.d['movimentos'] if x['descritivo'] == 'COMPRA PAPELARIA')
+  verifica(m['categoria'] == 'Material' and m['negocio_id'] and m['notas'] == 'Caixas para os bolos' and m['revisto'] and m['revisto_por'] == 'Ana Silva', f'[{rotulo}] movimento classificado e revisto')
+  sem_scroll(pg, 'movimento', rotulo)
+  pg.keyboard.press('Escape')
+  # filtros
+  pg.get_by_role('group', name='Filtros').get_by_role('button', name='Entradas').click()
+  expect(pg.locator('[data-movimento]')).to_have_count(1)
+  pg.get_by_role('group', name='Filtros').get_by_role('button', name='Todos').click()
+  pg.get_by_label('Categoria').select_option('Material')
+  expect(pg.locator('[data-movimento]')).to_have_count(1)
+  pg.get_by_label('Categoria').select_option('')
+  pg.get_by_role('group', name='Filtros').get_by_role('button', name='Por rever').click()
+  expect(pg.locator('[data-movimento]')).to_have_count(2)
+  pg.get_by_role('group', name='Filtros').get_by_role('button', name='Por rever').click()
+  # importar extrato com pré-visualização (a linha de 31/02/2026 e a de "abc" ficam de fora)
+  pg.get_by_role('button', name='Importar').click()
+  dlg = pg.get_by_role('dialog')
+  dlg.get_by_label('Ficheiro do extrato').set_input_files(os.path.join(RAIZ, 'tests', 'amostras', 'extrato-debito-credito.csv'))
+  expect(dlg.locator('[data-teste="pre-visualizacao"]')).to_contain_text('5 movimentos')
+  expect(dlg.locator('[data-teste="pre-visualizacao"]')).to_contain_text('2 linhas ficaram de fora')
+  expect(dlg.get_by_label('Linhas que ficaram de fora')).to_contain_text('Data inválida: "31/02/2026"')
+  expect(dlg.get_by_label('Linhas que ficaram de fora')).to_contain_text('Valor inválido: "abc"')
+  verifica(len(mock.d['movimentos']) == 3, f'[{rotulo}] pré-visualizar não grava')
+  sem_scroll(pg, 'importar extrato', rotulo)
+  dlg.get_by_role('button', name='Importar 5 movimentos').click()
+  expect(pg.get_by_role('status').filter(has_text='5 movimentos importados.')).to_be_visible()
+  imp = [x for x in mock.d['movimentos'] if x['origem'] == 'extrato']
+  verifica(len(imp) == 5 and sorted(x['valor'] for x in imp) == [-40, -12.5, -12.5, -12.5, 1234.56], f'[{rotulo}] extrato importado (1.234,56 e −12,50)')
+  # importar o mesmo ficheiro outra vez não repete
+  pg.get_by_role('button', name='Importar').click()
+  pg.get_by_role('dialog').get_by_label('Ficheiro do extrato').set_input_files(os.path.join(RAIZ, 'tests', 'amostras', 'extrato-debito-credito.csv'))
+  pg.get_by_role('dialog').get_by_role('button', name='Importar 5 movimentos').click()
+  expect(pg.get_by_role('status').filter(has_text='0 movimentos importados. 5 já existiam.')).to_be_visible()
+  # exportar
+  with pg.expect_download() as dl: pg.get_by_role('button', name=re.compile('Exportar')).click()
+  csv = open(dl.value.path(), encoding='utf-8-sig').read()
+  verifica(csv.startswith('Data;Descritivo;Contraparte;Valor') and '1234,56' in csv and 'Material' in csv, f'[{rotulo}] exportação em CSV à portuguesa')
+
+  # ---- acessos: o Bruno só vê o que lhe derem ----
+  outro = ctx.browser.new_context(viewport=vp)
+  pb = abrir(outro, mock, 'bruno@exemplo.pt', None, erros, rotulo + ' bruno')
+  ir(pb, '/banco')
+  expect(pb.get_by_role('heading', name='Olá, Bruno')).to_be_visible()
+  if movel: pb.get_by_role('button', name='Mais').click()
+  verifica(pb.locator('a[href="/banco"]').count() == 0 and pb.locator('a[href="/email"]').count() == 0, f'[{rotulo}] membro sem acesso não vê Email nem Banco')
+  ir(pg, '/definicoes')
+  eq = pg.locator('section', has=pg.get_by_role('heading', name='Equipa'))
+  cx = eq.get_by_role('group', name='Acessos de Bruno Costa').get_by_role('checkbox', name='Banco'); cx.click(); expect(cx).to_be_checked()
+  pg.wait_for_timeout(300)
+  bruno = next(x for x in mock.d['membros'] if x['email'] == 'bruno@exemplo.pt')
+  verifica(bruno['acessos'] == ['banco'], f'[{rotulo}] administradora dá acesso ao Banco ({bruno["acessos"]})')
+  sem_scroll(pg, 'Definições com acessos', rotulo)
+  ir(pb, '/banco')
+  expect(pb.get_by_role('heading', name='Banco')).to_be_visible()
+  expect(pb.locator('[data-movimento]').first).to_be_visible()
+  verifica(pb.get_by_role('button', name='Ligar um banco').count() == 0, f'[{rotulo}] membro não liga bancos')
+  outro.close()
+  ctx.browser.close()
+
+def historia_versao(p, rotulo, vp):
+  """aviso de versão nova: aparece quando /versao.json muda, fecha-se, volta na verificação seguinte e Atualizar recarrega"""
+  mock = Mock(semente_modulos)
+  ctx = p.chromium.launch().new_context(viewport=vp)
+  pg = abrir(ctx, mock, 'ana@exemplo.pt', None, erros, rotulo + ' versão')
+  publicada = {'v': None}
+  def versao(route):
+    if publicada['v']: return route.fulfill(status=200, json={'versao': publicada['v']}, headers={'Cache-Control': 'no-store'})
+    return route.continue_()
+  pg.route(re.compile(r'.*/versao\.json(\?.*)?$'), versao)
+  pedidos = []
+  pg.on('request', lambda r: pedidos.append(r) if '/versao.json' in r.url else None)
+  ir(pg, '/')
+  pg.wait_for_timeout(400)
+  aviso = pg.get_by_role('status', name='Nova versão')
+  verifica(aviso.count() == 0, f'[{rotulo}] sem aviso quando a versão é a mesma')
+  verifica(len(pedidos) >= 1 and all('?t=' in r.url for r in pedidos), f'[{rotulo}] verifica a versão ao abrir (sem cache)')
+  publicada['v'] = 'outra-versao'
+  pg.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+  expect(aviso).to_contain_text('Há uma versão mais recente desta app.')
+  sem_scroll(pg, 'aviso de versão', rotulo)
+  caixa = aviso.bounding_box()
+  verifica(caixa and caixa['y'] < 40 and caixa['x'] >= 0 and caixa['x'] + caixa['width'] <= vp['width'], f'[{rotulo}] aviso no topo, dentro do ecrã')
+  aviso.get_by_role('button', name='Fechar aviso de versão').click()
+  expect(aviso).to_have_count(0)
+  pg.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+  expect(aviso).to_be_visible()
+  with pg.expect_navigation():
+    aviso.get_by_role('button', name='Atualizar').click()
+  verifica(True, f'[{rotulo}] Atualizar recarrega a página')
+  ctx.browser.close()
+
 def demo(s):
   # dados de exemplo só para as imagens do README
   s.d['definicoes'][0].update({'nome_negocio': 'Atelier Exemplo', 'cor': '#0f766e', 'email': 'ola@exemplo.pt', 'site': 'exemplo.pt'})
@@ -278,8 +547,10 @@ def fotos(p):
 with sync_playwright() as p:
   for rotulo, vp in VISTAS:
     print(f'== {rotulo} {vp["width"]}px')
-    try: historia(p, rotulo, vp)
-    except Exception as e: falhas.append(f'[{rotulo}] parou: {str(e)[:600]}'); print('  PAROU:', str(e)[:600])
+    for h in (historia, historia_modulos, historia_versao):
+      if SO and h.__name__ not in SO: continue
+      try: h(p, rotulo, vp)
+      except Exception as e: falhas.append(f'[{rotulo}] {h.__name__} parou: {str(e)[:600]}'); print(f'  PAROU ({h.__name__}):', str(e)[:600])
   if FOTOS: fotos(p)
 
 print(f'\n{len(ok)} verificações passaram, {len(falhas)} falharam, {len(erros)} erros na consola ou na página')

@@ -80,6 +80,9 @@ export const iniciais = (nome: string) => nome.split(/\s+/).filter(Boolean).slic
 export const normaliza = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[’'`´.,;:\-_/()]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase()
 export const maiuscula = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 export const emailValido = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim())
+// mais exigente, para enviar emails (o mesmo critério da função no servidor)
+export const enderecoValido = (e: string) => /^[^\s@<>(),;:"[\]]+@[^\s@<>(),;:"[\]]+\.[^\s@<>(),;:"[\]]{2,}$/.test(e.trim())
+export const tamanhoLegivel = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1).replace('.', ',')} MB`)
 export const numeroLimpo = (t: string) => t.replace(/[^\d+]/g, '')
 // números portugueses de 9 dígitos ganham o indicativo 351 para o WhatsApp
 export const numeroWhatsapp = (t: string) => numeroLimpo(t).replace(/^\+/, '').replace(/^00/, '').replace(/^([29]\d{8})$/, '351$1')

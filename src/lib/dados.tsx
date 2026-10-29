@@ -4,7 +4,7 @@ import { supabase } from './supabase'
 import { aplicarMarca } from './tema'
 import { definirMoeda } from './util'
 import { CONFIG } from '../config'
-import type { Agenda, Atividade, Contacto, Definicoes, Empresa, Fase, Membro, Negocio, Tarefa } from './tipos'
+import type { Agenda, Atividade, Contacto, Definicoes, Empresa, Fase, Membro, Modulo, Negocio, Tarefa } from './tipos'
 
 type Tabelas = { membros: Membro[]; empresas: Empresa[]; contactos: Contacto[]; negocios: Negocio[]; atividades: Atividade[]; agenda: Agenda[]; tarefas: Tarefa[] }
 type Editavel = 'empresas' | 'contactos' | 'negocios' | 'atividades' | 'agenda' | 'tarefas'
@@ -19,6 +19,20 @@ export const DEFINICOES_PADRAO: Definicoes = {
     { id: 'perdido', nome: 'Perdido', cor: 'vermelho', tipo: 'perdido' },
   ],
   proposta_intro: '', proposta_condicoes: '', proposta_validade_dias: 30,
+  modulo_email: false, modulo_banco: false, email_config: {}, banco_config: {}, banco_categorias: [],
+}
+
+/** chama uma Edge Function (email ou banco) com a sessão de quem está a usar a app; erros com mensagem clara */
+export async function funcao<T = Record<string, unknown>>(nome: 'email' | 'banco', corpo: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.functions.invoke(nome, { body: corpo })
+  if (error) {
+    let msg = error.message
+    try { const b = await (error as { context?: Response }).context?.json(); if (b?.erro) msg = b.erro } catch { /* sem corpo */ }
+    if (/Failed to send|Failed to fetch|NetworkError/i.test(msg)) msg = `Não foi possível falar com o servidor. Confirme que a função "${nome}" está publicada no Supabase.`
+    throw new Error(msg)
+  }
+  if (data && typeof data === 'object' && 'erro' in data) throw new Error(String((data as { erro: unknown }).erro))
+  return data as T
 }
 
 // "a_carregar" enquanto lê; "sem_acesso" se a conta não está na equipa; "inativo" se foi desativada
@@ -27,6 +41,8 @@ export type Acesso = 'a_carregar' | 'ok' | 'sem_acesso' | 'inativo' | 'erro'
 type Ctx = Tabelas & {
   sessao: Session | null; semSessao: boolean; acesso: Acesso; erro: string | null; definicoes: Definicoes
   eu: Membro | null; eAdmin: boolean
+  /** o módulo está ligado em Definições e a pessoa tem acesso (administradores sempre) */
+  pode: (m: Modulo) => boolean
   recarregar: () => Promise<void>
   gravar: <T = Record<string, unknown>>(tabela: Editavel, linha: Record<string, unknown> & { id?: string }) => Promise<T>
   apagar: (tabela: Editavel, id: string) => Promise<void>
@@ -161,6 +177,7 @@ export function DadosProvider({ children }: { children: ReactNode }) {
     const faseDe = (id: string) => fases.find(f => f.id === id) ?? { id, nome: id, cor: 'cinza' as const, tipo: 'aberto' as const }
     return {
       ...t, sessao, semSessao, acesso, erro, definicoes, eu, eAdmin: eu?.papel === 'admin',
+      pode: m => !!eu && eu.ativo && (m === 'email' ? definicoes.modulo_email : definicoes.modulo_banco) && (eu.papel === 'admin' || (eu.acessos ?? []).includes(m)),
       recarregar, gravar, apagar, registar, guardarDefinicoes,
       empresaDe: id => (id ? emp.get(id) : undefined),
       contactoDe: id => (id ? con.get(id) : undefined),
