@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, Archive, Download, FolderInput, Folder, Inbox, Mail, MailOpen, Paperclip, PenSquare, RefreshCw, Reply, ReplyAll, Search, Send, Trash2, Forward, AlertOctagon, FileText, X } from 'lucide-react'
+import { ArrowLeft, Archive, Download, FolderInput, Folder, Inbox, Mail, MailOpen, Paperclip, PenSquare, RefreshCw, Reply, ReplyAll, Search, Send, Trash2, Forward, AlertOctagon, FileText, X, Copy, UserPlus, Users, Eye, Loader2 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { funcao, useDados } from '../lib/dados'
 import type { Email as EmailT, EspecialPasta, PastaEmail } from '../lib/tipos'
@@ -8,6 +9,9 @@ import { dataCurta, dataLonga, hora, hoje, isoDia, normaliza, tamanhoLegivel } f
 import { Erro, Vazio } from '../components/ui'
 import { useDialogo } from '../components/Dialogo'
 import Escrever, { type Rascunho } from '../components/Escrever'
+import PdfVista from '../components/PdfVista'
+import ContactoPainel from '../components/ContactoPainel'
+import { useGarantirEmpresa } from '../components/Escolher'
 
 const ICONE: Record<EspecialPasta, typeof Inbox> = { entrada: Inbox, enviados: Send, lixo: Trash2, rascunhos: FileText, spam: AlertOctagon, arquivo: Archive }
 const NOME: Record<EspecialPasta, string> = { entrada: 'Entrada', enviados: 'Enviados', lixo: 'Lixo', rascunhos: 'Rascunhos', spam: 'Spam', arquivo: 'Arquivo' }
@@ -65,6 +69,116 @@ function Corpo({ e }: { e: EmailT }) {
   )
 }
 
+// o tipo verdadeiro do anexo: muitos servidores mandam PDFs como application/octet-stream
+function tipoReal(bytes: Uint8Array, tipo: string, nome: string) {
+  const ini = String.fromCharCode(...bytes.subarray(0, 8))
+  if (ini.startsWith('%PDF')) return 'application/pdf'
+  if (bytes[0] === 0x89 && ini.slice(1, 4) === 'PNG') return 'image/png'
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg'
+  if (tipo && tipo !== 'application/octet-stream') return tipo
+  const ext = nome.toLowerCase().split('.').pop() ?? ''
+  return ({ pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' } as Record<string, string>)[ext] ?? tipo ?? 'application/octet-stream'
+}
+type Previa = { nome: string; tipo: string; dados: Uint8Array; url: string }
+// pré visualização de PDFs e imagens dentro da app; o resto descarrega
+function VerAnexo({ previa, onFechar }: { previa: Previa; onFechar: () => void }) {
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onFechar() }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k) }, [onFechar])
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3" role="dialog" aria-modal="true" aria-label={previa.nome}>
+      <div className="absolute inset-0 bg-stone-900/40" onClick={onFechar} />
+      <div className="relative w-full max-w-3xl space-y-3 rounded-2xl bg-white p-3 shadow-2xl">
+        <div className="flex items-center gap-2">
+          <p className="min-w-0 flex-1 truncate font-semibold">{previa.nome}</p>
+          <a className="btn-outline px-2.5 py-1.5 text-xs" href={previa.url} download={previa.nome}><Download size={14} /> Descarregar</a>
+          <button className="rounded-lg p-1.5 text-stone-500 hover:bg-stone-100" aria-label="Fechar" onClick={onFechar}><X size={18} /></button>
+        </div>
+        {previa.tipo === 'application/pdf' ? <PdfVista dados={previa.dados} titulo={previa.nome} /> : <div className="flex h-[75vh] items-center justify-center overflow-auto rounded-lg bg-stone-100"><img src={previa.url} alt={previa.nome} className="max-h-full max-w-full object-contain" /></div>}
+      </div>
+    </div>
+  )
+}
+
+// nome de quem enviou: carregar mostra o email completo, copiar e juntar aos contactos
+function Remetente({ nome, email }: { nome: string | null; email: string | null }) {
+  const { contactos, empresas, gravar } = useDados()
+  const garantirEmpresa = useGarantirEmpresa()
+  const [aberto, setAberto] = useState(false)
+  const [form, setForm] = useState<{ nome: string; empresa: string; cargo: string; telefone: string } | null>(null)
+  const [ficha, setFicha] = useState<string | null>(null)
+  const [erro, setErro] = useState<string | null>(null)
+  const [aGuardar, setAGuardar] = useState(false)
+  const [copiado, setCopiado] = useState(false)
+  const caixa = useRef<HTMLSpanElement>(null)
+  const pop = useRef<HTMLSpanElement>(null)
+  // a caixa abre por cima de tudo (o cartão do email corta o que sai dele), presa ao nome
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const fechar = () => { setAberto(false); setForm(null) }
+  const abrir = () => {
+    const r = caixa.current?.getBoundingClientRect(); if (!r) return
+    const largura = Math.min(288, window.innerWidth * 0.85)
+    setPos({ top: r.bottom + 6, left: Math.max(8, Math.min(r.left, window.innerWidth - largura - 8)) })
+    setAberto(a => !a)
+  }
+  useEffect(() => {
+    if (!aberto) return
+    const f = (ev: MouseEvent | TouchEvent) => { const t = ev.target as Node; if (!caixa.current?.contains(t) && !pop.current?.contains(t)) fechar() }
+    const rolou = (ev: Event) => { if (!pop.current?.contains(ev.target as Node)) fechar() }
+    const tecla = (ev: KeyboardEvent) => { if (ev.key === 'Escape') fechar() }
+    document.addEventListener('keydown', tecla)
+    document.addEventListener('mousedown', f); document.addEventListener('touchstart', f)
+    window.addEventListener('resize', fechar); window.addEventListener('scroll', rolou, true)
+    return () => { document.removeEventListener('mousedown', f); document.removeEventListener('touchstart', f); window.removeEventListener('resize', fechar); window.removeEventListener('scroll', rolou, true); document.removeEventListener('keydown', tecla) }
+  }, [aberto])
+  // perto do fundo do ecrã a caixa sobe para caber toda
+  useLayoutEffect(() => {
+    if (!aberto || !pop.current || !caixa.current) return
+    const h = pop.current.offsetHeight; const r = caixa.current.getBoundingClientRect()
+    let top = r.bottom + 6
+    if (top + h > window.innerHeight - 8) top = Math.max(8, Math.min(r.top - 6 - h, window.innerHeight - 8 - h))
+    setPos(p => (p && p.top !== top ? { ...p, top } : p))
+  }, [aberto, form])
+  const mail = (email ?? '').toLowerCase()
+  const existente = contactos.find(c => (c.email ?? '').toLowerCase() === mail)
+  const dominio = /@(gmail|hotmail|outlook|live|sapo|icloud|yahoo|me|msn|gmx|protonmail)\./i.test(mail) ? '' : mail.split('@')[1] ?? ''
+  const empresaDominio = dominio ? empresas.find(x => contactos.some(c => c.empresa_id === x.id && (c.email ?? '').toLowerCase().endsWith('@' + dominio))) : undefined
+  async function guardar() {
+    if (!form?.nome.trim()) { setErro('Falta o nome.'); return }
+    setAGuardar(true); setErro(null)
+    try {
+      const empresa_id = await garantirEmpresa(form.empresa)
+      const novo = await gravar<{ id: string }>('contactos', { nome: form.nome.trim(), email: mail || null, cargo: form.cargo.trim() || null, telefone: form.telefone.trim() || null, empresa_id, origem: 'Email' })
+      fechar(); setFicha(novo.id)
+    } catch (x) { setErro((x as Error).message) } finally { setAGuardar(false) }
+  }
+  if (!email) return <>{nome || '(sem remetente)'}</>
+  return (
+    <span ref={caixa} className="relative" onClick={ev => ev.stopPropagation()} onKeyDown={ev => ev.stopPropagation()}>
+      <button type="button" className="rounded underline decoration-stone-300 decoration-dotted underline-offset-2 hover:text-marca-700" title="Ver o email e juntar aos contactos" onClick={abrir}>{nome || email}</button>
+      {aberto && pos && createPortal(
+        <span ref={pop} onClick={ev => ev.stopPropagation()} style={{ top: pos.top, left: pos.left }} className="fixed z-50 block max-h-[70vh] w-72 max-w-[85vw] overflow-y-auto whitespace-normal rounded-2xl bg-white p-3 text-left text-sm font-normal text-stone-700 shadow-xl ring-1 ring-stone-200">
+          <span className="block font-semibold text-stone-900">{nome || email}</span>
+          <span className="mt-0.5 flex items-center gap-2"><span className="mono min-w-0 flex-1 select-all break-all text-xs text-stone-600">{email}</span>
+            <button type="button" className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-marca-700 ring-1 ring-stone-200 hover:bg-stone-50" onClick={async () => { try { await navigator.clipboard.writeText(email); setCopiado(true); setTimeout(() => setCopiado(false), 1500) } catch { /* sem acesso */ } }}><Copy size={11} className="inline" /> {copiado ? 'Copiado' : 'Copiar'}</button></span>
+          {existente ? (
+            <button type="button" className="btn-outline mt-3 w-full justify-center py-1.5 text-sm" onClick={() => { fechar(); setFicha(existente.id) }}><Users size={14} /> Ver a ficha de {existente.nome.split(' ')[0]}</button>
+          ) : !form ? (
+            <button type="button" className="btn-primary mt-3 w-full justify-center py-1.5 text-sm" onClick={() => setForm({ nome: nome ?? '', empresa: empresaDominio?.nome ?? '', cargo: '', telefone: '' })}><UserPlus size={14} /> Adicionar aos contactos</button>
+          ) : (
+            <span className="mt-3 block space-y-2">
+              {([['nome', 'Nome'], ['empresa', 'Empresa'], ['cargo', 'Cargo'], ['telefone', 'Telefone']] as const).map(([k, l]) => (
+                <label key={k} className="block"><span className="text-[11px] font-semibold uppercase tracking-wide text-stone-400">{l}</span><input className="input py-1.5 text-sm" value={form[k]} onChange={ev => setForm(f => (f ? { ...f, [k]: ev.target.value } : f))} autoFocus={k === 'nome'} /></label>
+              ))}
+              {erro && <span className="block text-xs text-red-700">{erro}</span>}
+              <span className="flex justify-end gap-2"><button type="button" className="btn-ghost px-2.5 py-1 text-xs" onClick={() => setForm(null)}>Cancelar</button><button type="button" className="btn-primary px-2.5 py-1 text-xs" disabled={aGuardar} onClick={guardar}>{aGuardar ? 'A guardar' : 'Guardar contacto'}</button></span>
+            </span>
+          )}
+        </span>, document.body
+      )}
+      {ficha && <ContactoPainel id={ficha} onFechar={() => setFicha(null)} />}
+    </span>
+  )
+}
+
 export default function Email() {
   const { definicoes, contactoDe, eAdmin, recarregar: recarregarDados } = useDados()
   const { confirmar } = useDialogo()
@@ -82,6 +196,10 @@ export default function Email() {
   const [aviso, setAviso] = useState<string | null>(null)
   const [gaveta, setGaveta] = useState(false)
   const [rascunho, setRascunho] = useState<Rascunho | null>(null)
+  const [previa, setPrevia] = useState<Previa | null>(null)
+  const [aAbrirAnexo, setAAbrirAnexo] = useState<string | null>(null)
+  // procurar em todo o email: com texto na caixa, a busca vai a todas as pastas
+  const [achados, setAchados] = useState<EmailT[] | null>(null)
   const configurado = !!definicoes.email_config?.imap_host
 
   const lerPastas = useCallback(async () => {
@@ -152,15 +270,31 @@ export default function Email() {
       if (nome === 'mover') setAviso('Email movido.')
     } catch (e) { setErro((e as Error).message) }
   }
-  async function descarregar(e: EmailT, parte: string) {
+  async function abrirAnexo(e: EmailT, parte: string) {
+    setAAbrirAnexo(e.id + parte); setErro(null)
     try {
       const a = await funcao<{ nome: string; tipo: string; base64: string }>('email', { acao: 'anexo', id: e.id, parte })
       const bytes = Uint8Array.from(atob(a.base64), c => c.charCodeAt(0))
-      const url = URL.createObjectURL(new Blob([bytes], { type: a.tipo }))
+      const tipo = tipoReal(bytes, a.tipo, a.nome)
+      const url = URL.createObjectURL(new Blob([bytes], { type: tipo }))
+      if (tipo === 'application/pdf' || tipo.startsWith('image/')) { setPrevia({ nome: a.nome, tipo, dados: bytes, url }); return }
       const l = document.createElement('a'); l.href = url; l.download = a.nome; document.body.appendChild(l); l.click(); l.remove()
       setTimeout(() => URL.revokeObjectURL(url), 5000)
-    } catch (err) { setErro((err as Error).message) }
+    } catch (err) { setErro((err as Error).message) } finally { setAAbrirAnexo(null) }
   }
+  const fecharPrevia = useCallback(() => setPrevia(p => { if (p) URL.revokeObjectURL(p.url); return null }), [])
+
+  useEffect(() => {
+    const q = busca.trim()
+    if (q.length < 2) { setAchados(null); return }
+    const t = setTimeout(async () => {
+      const like = `%${q.replace(/[%_,()]/g, ' ')}%`
+      const { data, error } = await supabase.from('emails').select('id, pasta, uid, message_id, in_reply_to, referencias, de_nome, de_email, para, cc, assunto, data, lido, respondido, anexos, resumo, contacto_id, corpo_em')
+        .or(`assunto.ilike.${like},de_nome.ilike.${like},de_email.ilike.${like},resumo.ilike.${like}`).order('data', { ascending: false }).limit(200)
+      if (error) setErro(error.message); else setAchados((data ?? []) as EmailT[])
+    }, 300)
+    return () => clearTimeout(t)
+  }, [busca])
 
   const eu = (definicoes.email_config?.endereco ?? '').toLowerCase()
   function responder(e: EmailT, modo: 'um' | 'todos' | 'reencaminhar') {
@@ -181,8 +315,11 @@ export default function Email() {
 
   const filtrada = useMemo(() => {
     const q = normaliza(busca.trim())
-    return lista.filter(e => (!soNaoLidos || !e.lido) && (!q || normaliza(`${e.assunto} ${e.de_nome ?? ''} ${e.de_email ?? ''} ${e.para.map(x => `${x.nome ?? ''} ${x.email}`).join(' ')} ${e.resumo ?? ''}`).includes(q)))
-  }, [lista, busca, soNaoLidos])
+    // na busca por todo o email, o Lixo e o Spam só entram se estiver lá
+    const esconder = new Set(pastas.filter(p => (p.especial === 'lixo' || p.especial === 'spam') && p.caminho !== pasta).map(p => p.caminho))
+    const base = achados ? [...lista, ...achados.filter(a => !lista.some(x => x.id === a.id) && !esconder.has(a.pasta))] : lista
+    return base.filter(e => (!soNaoLidos || !e.lido) && (!q || normaliza(`${e.assunto} ${e.de_nome ?? ''} ${e.de_email ?? ''} ${e.para.map(x => `${x.nome ?? ''} ${x.email}`).join(' ')} ${e.resumo ?? ''}`).includes(q)))
+  }, [lista, busca, soNaoLidos, achados, pastas, pasta])
   const atual = pastas.find(p => p.caminho === pasta)
   const enviados = atual?.especial === 'enviados'
   const e = conversa.find(x => x.id === aberto) ?? null
@@ -224,7 +361,7 @@ export default function Email() {
 
         <section aria-label="Lista de emails" className={`min-w-0 overflow-y-auto border-r border-stone-200 bg-white ${aberto ? 'max-lg:hidden' : ''}`}>
           <div className="sticky top-0 z-10 space-y-2 border-b border-stone-100 bg-white p-3">
-            <div className="relative"><Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" /><input className="input pl-9" placeholder="Procurar" aria-label="Procurar emails" value={busca} onChange={ev => setBusca(ev.target.value)} /></div>
+            <div className="relative"><Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" /><input className="input pl-9" placeholder="Procurar em todo o email" aria-label="Procurar em todo o email" value={busca} onChange={ev => setBusca(ev.target.value)} /></div>
             <div className="flex gap-1.5">
               <button className={`badge px-3 py-1.5 text-xs ${!soNaoLidos ? 'bg-marca-700 text-sobre-marca' : 'bg-white text-stone-600 ring-1 ring-stone-200'}`} onClick={() => setSoNaoLidos(false)}>Todos</button>
               <button className={`badge px-3 py-1.5 text-xs ${soNaoLidos ? 'bg-marca-700 text-sobre-marca' : 'bg-white text-stone-600 ring-1 ring-stone-200'}`} onClick={() => setSoNaoLidos(true)}>Não lidos{atual?.nao_lidos ? ` (${atual.nao_lidos})` : ''}</button>
@@ -241,6 +378,7 @@ export default function Email() {
                       <span className="flex items-baseline gap-2"><span className={`min-w-0 flex-1 truncate text-sm ${m.lido ? '' : 'font-semibold'}`}>{quem}</span><span className="shrink-0 text-xs text-stone-500">{quando(m.data)}</span></span>
                       <span className={`flex items-center gap-1 truncate text-sm ${m.lido ? 'text-stone-700' : 'font-semibold'}`}>{m.respondido && <Reply size={12} className="shrink-0 text-stone-400" aria-label="Respondido" />}{m.anexos.length > 0 && <Paperclip size={12} className="shrink-0 text-stone-400" aria-label="Com anexos" />}<span className="truncate">{m.assunto || '(sem assunto)'}</span></span>
                       <span className="block truncate text-xs text-stone-500">{m.resumo}</span>
+                      {m.pasta !== pasta && <span className="badge mr-1 mt-1 bg-stone-100 text-stone-500"><Folder size={11} className="mr-0.5 inline" />{(() => { const pp = pastas.find(p => p.caminho === m.pasta); return pp ? nomePasta(pp) : m.pasta })()}</span>}
                       {m.contacto_id && contactoDe(m.contacto_id) && <span className="badge mt-1 bg-stone-100 text-stone-600">{contactoDe(m.contacto_id)!.nome}</span>}
                     </button>
                   </li>
@@ -274,17 +412,17 @@ export default function Email() {
                 const c = contactoDe(x.contacto_id)
                 return (
                   <div key={x.id} className="card overflow-hidden" data-mensagem={x.id === e.id ? 'aberta' : 'conversa'}>
-                    <button className="flex w-full items-start gap-3 px-4 py-3 text-left" onClick={() => (abertoX ? x.id !== e.id && setExpandidos(s => { const n = new Set(s); n.delete(x.id); return n }) : expandir(x))} aria-expanded={abertoX}>
+                    <div role="button" tabIndex={0} className="flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left" onClick={() => (abertoX ? x.id !== e.id && setExpandidos(s => { const n = new Set(s); n.delete(x.id); return n }) : expandir(x))} onKeyDown={k => { if (k.key === 'Enter') { if (abertoX) { if (x.id !== e.id) setExpandidos(s => { const n = new Set(s); n.delete(x.id); return n }) } else expandir(x) } }} aria-expanded={abertoX}>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-semibold">{x.de_nome || x.de_email}{x.de_nome && <span className="font-normal text-stone-500"> &lt;{x.de_email}&gt;</span>}</span>
+                        <span className="block truncate text-sm font-semibold">{(x.de_email ?? '').toLowerCase() === eu ? (x.de_nome || x.de_email) : <Remetente nome={x.de_nome} email={x.de_email} />}{x.de_nome && <span className="font-normal text-stone-500"> &lt;{x.de_email}&gt;</span>}</span>
                         {abertoX ? <span className="block truncate text-xs text-stone-500">Para: {x.para.map(p => p.nome || p.email).join(', ')}{x.cc.length ? ` · Cc: ${x.cc.map(p => p.nome || p.email).join(', ')}` : ''}</span> : <span className="block truncate text-xs text-stone-500">{x.resumo}</span>}
                       </span>
                       <span className="shrink-0 text-right text-xs text-stone-500">{dataCurta(x.data)}<br />{hora(x.data)}</span>
-                    </button>
+                    </div>
                     {abertoX && <div className="space-y-3 border-t border-stone-100 px-4 py-3">
                       {c && <span className="badge bg-marca-50 text-marca-800">Contacto: {c.nome}</span>}
                       {x.corpo_em || x.texto || x.html ? <Corpo e={x} /> : <p className="text-sm text-stone-400">A abrir</p>}
-                      {x.anexos.length > 0 && <ul className="flex flex-wrap gap-2" aria-label="Anexos">{x.anexos.map(a => <li key={a.parte} className="max-w-full"><button className="btn-outline max-w-full px-2.5 py-1.5 text-xs" onClick={() => descarregar(x, a.parte)}><Download size={14} className="shrink-0" /><span className="truncate">{a.nome}</span><span className="shrink-0 text-stone-400">{tamanhoLegivel(a.tamanho)}</span></button></li>)}</ul>}
+                      {x.anexos.length > 0 && <ul className="flex flex-wrap gap-2" aria-label="Anexos">{x.anexos.map(a => <li key={a.parte} className="max-w-full"><button className="btn-outline max-w-full px-2.5 py-1.5 text-xs" onClick={() => abrirAnexo(x, a.parte)} disabled={aAbrirAnexo === x.id + a.parte}>{aAbrirAnexo === x.id + a.parte ? <Loader2 size={14} className="shrink-0 animate-spin" /> : /pdf|image/i.test(a.tipo) || /\.(pdf|png|jpe?g|gif|webp)$/i.test(a.nome) ? <Eye size={14} className="shrink-0" /> : <Download size={14} className="shrink-0" />}<span className="truncate">{a.nome}</span><span className="shrink-0 text-stone-400">{tamanhoLegivel(a.tamanho)}</span></button></li>)}</ul>}
                     </div>}
                   </div>
                 )
@@ -303,6 +441,7 @@ export default function Email() {
           </div>
         </div>
       )}
+      {previa && <VerAnexo previa={previa} onFechar={fecharPrevia} />}
       <Escrever rascunho={rascunho} onFechar={() => setRascunho(null)} onEnviado={r => { setAviso(`Email enviado.${r.atividades ? ' Ficou no histórico do contacto.' : ''}${r.avisos?.length ? ' ' + r.avisos.join(' ') : ''}`); lerPastas(); if (enviados) lerLista(pasta); if (r.atividades) recarregarDados() }} />
     </div>
   )

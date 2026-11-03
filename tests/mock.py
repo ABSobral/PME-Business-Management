@@ -22,6 +22,22 @@ DEFINICOES = {"id": 1, "nome_negocio": "O meu negócio", "logo_url": None, "cor"
   "modulo_email": False, "modulo_banco": False, "email_config": {}, "banco_config": {},
   "banco_categorias": ["Vendas", "Sinal de cliente", "Fornecedores", "Material", "Renda", "Comissões bancárias", "Outros"]}
 
+
+def pdf_minimo(texto='Lista'):
+  """Um PDF pequeno mas válido (uma página com uma linha de texto), para a pré visualização."""
+  objs = [b'<< /Type /Catalog /Pages 2 0 R >>', b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+          None, b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+  fluxo = ('BT /F1 18 Tf 40 100 Td (%s) Tj ET' % texto).encode()
+  objs[3] = b'<< /Length %d >>\nstream\n' % len(fluxo) + fluxo + b'\nendstream'
+  out = b'%PDF-1.4\n'; pos = []
+  for i, o in enumerate(objs):
+    pos.append(len(out)); out += b'%d 0 obj\n' % (i + 1) + o + b'\nendobj\n'
+  x = len(out)
+  out += b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs) + 1) + b''.join(b'%010d 00000 n \n' % q for q in pos)
+  out += b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs) + 1, x)
+  return out
+
 def b64(d): return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip('=')
 def sessao(email, uid=None, nome=None):
   uid = uid or str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
@@ -325,7 +341,7 @@ def correio_exemplo(s):
     s.correio['INBOX'].append({'uid': s.uid_seguinte, 'message_id': f'<{uuid.uuid4()}@padaria.pt>', 'in_reply_to': None, 'referencias': None, 'de_nome': de_nome, 'de_email': de_email,
       'para': [{'nome': 'Ana Silva', 'email': 'ana@exemplo.pt'}], 'cc': [], 'assunto': assunto, 'data': (agora - dt.timedelta(hours=horas)).isoformat(), 'lido': lido, 'respondido': False,
       'anexos': meta, 'resumo': ' '.join(l for l in texto.splitlines() if not l.startswith('>'))[:200], 'texto': texto, 'html': html, 'conteudo': conteudo})
-  msg('Pedido de orçamento', 'Rita Gonçalves', 'rita@padaria.pt', 'Olá Ana,\nqueria um orçamento para 3 bolos de aniversário.\n\nObrigada,\nRita\n\nEm 20 de outubro, Ana Silva escreveu:\n> Olá Rita, diga-nos do que precisa.', anexos=[('lista.pdf', 'application/pdf', b'%PDF-1.4 lista')], horas=1)
+  msg('Pedido de orçamento', 'Rita Gonçalves', 'rita@padaria.pt', 'Olá Ana,\nqueria um orçamento para 3 bolos de aniversário.\n\nObrigada,\nRita\n\nEm 20 de outubro, Ana Silva escreveu:\n> Olá Rita, diga-nos do que precisa.', anexos=[('lista.pdf', 'application/octet-stream', pdf_minimo('Lista de bolos'))], horas=1)
   msg('Novidades da semana', 'Fornecedor de Farinhas', 'novidades@farinhas.pt', 'Novos produtos esta semana.', html='<h1>Novidades</h1><p>Farinha <b>T65</b> com desconto.</p><blockquote>Mensagem antiga citada</blockquote><script>window.parent.alert(1)</script>', horas=30, lido=True)
 
 def abrir(contexto, mock, email=None, nome=None, erros=None, rotulo=''):

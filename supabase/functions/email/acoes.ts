@@ -213,14 +213,8 @@ async function enviar(repo: Repo, membro: Membro, cfg: correio.ConfigCorreio, co
 
   // depois de enviado, o resto não pode fazer falhar o pedido (o email já saiu)
   const avisos: string[] = []
-  try {
-    const cli = await imap()
-    if (cfg.guardar_enviados !== false) await correio.guardarEnviado(cli, r.bruto)
-    if (original) { await correio.marcar(cli, original.pasta, [original.uid], "\\Answered", true); await repo.atualizarEmail(original.id, { respondido: true }) }
-    await guardarPastas(repo, await correio.listarPastas(cli))
-    const enviados = (await repo.pastas()).find(p => p.especial === "enviados")
-    if (enviados) await sincronizarPasta(repo, cli, enviados)
-  } catch (e) { avisos.push("O email foi enviado, mas não ficou na pasta Enviados: " + (e as Error).message) }
+  // o original fica logo marcado como respondido na app
+  if (original) { try { await repo.atualizarEmail(original.id, { respondido: true }) } catch (e) { console.error("respondido", e) } }
 
   // histórico: uma atividade em cada contacto que recebeu o email
   let atividades = 0
@@ -232,5 +226,21 @@ async function enviar(repo: Repo, membro: Membro, cfg: correio.ConfigCorreio, co
       atividades++
     }
   } catch (e) { avisos.push("O email foi enviado, mas não ficou no histórico do contacto: " + (e as Error).message) }
+
+  // guardar em Enviados e sincronizar é o mais lento: continua depois de responder, para a app não ficar à espera
+  // usa uma ligação própria: a do pedido fecha quando a resposta sai
+  const depois = (async () => {
+    let cli: ImapFlow | null = null
+    try {
+      cli = await correio.ligarImap(cfg)
+      if (cfg.guardar_enviados !== false) await correio.guardarEnviado(cli, r.bruto)
+      if (original) await correio.marcar(cli, original.pasta, [original.uid], "\\Answered", true)
+      await guardarPastas(repo, await correio.listarPastas(cli))
+      const enviados = (await repo.pastas()).find(p => p.especial === "enviados")
+      if (enviados) await sincronizarPasta(repo, cli, enviados)
+    } catch (e) { console.error("O email foi enviado, mas não ficou na pasta Enviados:", (e as Error).message) } finally { await correio.fechar(cli) }
+  })()
+  const er = (globalThis as unknown as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime
+  if (er?.waitUntil) er.waitUntil(depois); else await depois
   return { ok: true, message_id: r.message_id, aceites: r.aceites, atividades, avisos }
 }

@@ -25,6 +25,14 @@ Cada negócio põe o seu nome, logótipo, cor, moeda, IVA e fases do pipeline de
 
 Tecnologia: React 19, Vite, Tailwind CSS 4, TypeScript, lucide-react, dnd-kit e supabase-js. Sem servidor próprio: a segurança está nas regras da base de dados (RLS). Os dois módulos opcionais usam duas Edge Functions do Supabase (Deno), que só são precisas se ligar os módulos.
 
+## Novidades
+
+* **Telefone**: o botão Ligar mostra o número em grande, com Ligar e Copiar. Saíram os atalhos de SMS e WhatsApp, porque essas conversas não ficam registadas na app.
+* **Anexos**: PDFs e imagens abrem dentro da app, página a página (com o pdf.js), mesmo quando o servidor os manda como "application/octet-stream". Os outros ficheiros descarregam como antes, e a pré visualização tem sempre o botão Descarregar.
+* **Procurar em todo o email**: com duas letras ou mais, a busca passa a todas as pastas (assunto, remetente e resumo). Cada resultado de outra pasta mostra de onde vem; o Lixo e o Spam só entram quando se está neles.
+* **Quem enviou**: carregar no nome de quem enviou mostra o email completo, com Copiar e Adicionar aos contactos (nome, empresa, cargo e telefone, com a empresa sugerida pelo domínio). Se já for contacto, abre a ficha.
+* **Enviar mais rápido**: a app responde assim que o email sai; guardar a cópia em Enviados e sincronizar continua em segundo plano.
+
 ## Instalar, passo a passo
 
 Precisa de uma conta gratuita no [Supabase](https://supabase.com) e do Node.js 20 ou mais recente.
